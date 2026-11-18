@@ -5,7 +5,7 @@
 若你發現安全問題（例如：server.py 代理可被濫用、路徑穿越、XSS 等），請：
 
 1. **不要**公開 issue 描述細節。
-2. 透過 GitHub 私訊 / email 聯絡維護者（as1000028@gmail.com）。
+2. 透過 GitHub 私訊聯絡維護者（[@Sid-1996](https://github.com/Sid-1996)）。
 3. 提供重現步驟與影響範圍。
 
 我會在 30 天內回應。修復後會在 commit message 標註，不另發安全公告（個人專案規模）。
