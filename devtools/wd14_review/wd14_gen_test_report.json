@@ -1,0 +1,66 @@
+{
+  "results": [
+    {
+      "id": "A1",
+      "name": "成人向圖片在 UI 正常顯示且不被過濾",
+      "pass": true,
+      "detail": {
+        "rating": "內容分級：explicit（80%，只供參考）",
+        "general": 62,
+        "adultStyled": 15,
+        "names": [
+          "1girl",
+          "breasts",
+          "underwear",
+          "vibrator",
+          "vibrator_in_thighhighs",
+          "nipples",
+          "solo",
+          "panties"
+        ]
+      }
+    },
+    {
+      "id": "T17",
+      "name": "ComfyUI 生圖流程正常（反推功能沒有干擾）",
+      "pass": true,
+      "detail": {
+        "results": 1,
+        "goText": "生成",
+        "hist": 1,
+        "gen_seconds": 33,
+        "revDuringGen": {
+          "ms": 11525,
+          "ok": true,
+          "general": 40
+        }
+      }
+    },
+    {
+      "id": "T17b",
+      "name": "生圖進行中反推仍然可用",
+      "pass": true,
+      "detail": {
+        "revDuringGen": {
+          "ms": 11525,
+          "ok": true,
+          "general": 40
+        }
+      }
+    },
+    {
+      "id": "V5",
+      "name": "Console 沒有錯誤",
+      "pass": true,
+      "detail": {
+        "consoleErrors": [],
+        "pageErrors": []
+      }
+    }
+  ],
+  "summary": {
+    "total": 4,
+    "passed": 4,
+    "failed": []
+  }
+}

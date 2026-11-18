@@ -1,0 +1,98 @@
+{
+  "results": [
+    {
+      "id": "W1",
+      "name": "429 顯示後端白話訊息，且不冠「反推失敗」",
+      "pass": true,
+      "detail": {
+        "got": "同時反推的圖片太多，等一下再試"
+      }
+    },
+    {
+      "id": "W2a",
+      "name": "400 仍顯示原本的錯誤訊息",
+      "pass": true,
+      "detail": {
+        "got": "反推失敗：沒有收到圖片，請重新選一次"
+      }
+    },
+    {
+      "id": "W2b",
+      "name": "413 仍顯示「圖片太大囉」提示",
+      "pass": true,
+      "detail": {
+        "got": "圖片太大囉，換小一點的再試（最長邊 1024px 會自動縮）。"
+      }
+    },
+    {
+      "id": "W2c",
+      "name": "415 仍顯示「格式不行」提示",
+      "pass": true,
+      "detail": {
+        "got": "這個檔案格式不行，請換 PNG 或 JPG 圖片。"
+      }
+    },
+    {
+      "id": "W2d",
+      "name": "503 仍顯示「反推服務沒回應」提示",
+      "pass": true,
+      "detail": {
+        "got": "反推服務沒回應，按一下 F5 重新整理再試。"
+      }
+    },
+    {
+      "id": "W2e",
+      "name": "504 仍顯示「分析太久了」提示",
+      "pass": true,
+      "detail": {
+        "got": "分析太久了，這次沒等到結果。按「反推標籤」再試一次，或換張小一點的圖。"
+      }
+    },
+    {
+      "id": "W3",
+      "name": "真實 429 時 UI 顯示忙碌提示（不是「反推失敗」）",
+      "pass": true,
+      "detail": {
+        "bgCount": 3,
+        "error": {
+          "hidden": false,
+          "text": "同時反推的圖片太多，等一下再試"
+        }
+      }
+    },
+    {
+      "id": "W3b",
+      "name": "背景 3 個請求都成功（代表第 4 個才是被拒的那個）",
+      "pass": true,
+      "detail": {
+        "bgStatus": [
+          200,
+          200,
+          200
+        ]
+      }
+    },
+    {
+      "id": "W4",
+      "name": "忙碌過後下一個反推仍然正常（UI 沒有卡死）",
+      "pass": true,
+      "detail": {
+        "tags": true
+      }
+    },
+    {
+      "id": "W5",
+      "name": "Console 沒有錯誤",
+      "pass": true,
+      "detail": {
+        "consoleErrors": [],
+        "pageErrors": []
+      }
+    }
+  ],
+  "summary": {
+    "total": 10,
+    "passed": 10,
+    "failed": []
+  }
+}

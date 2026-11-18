@@ -13,6 +13,13 @@
 | `phase1_capture.mjs` | 1920×1080 截圖 + 三欄版面量測 | `node devtools/phase1_capture.mjs` |
 | `phase1_generate.mjs` | 實跑一次生成，驗證「生成中／生成結果／燈箱」 | `node devtools/phase1_generate.mjs` |
 | `phase11_tagname_test.mjs` | Phase 1.1 回歸測試（10 項，涵蓋 2 次真實生成） | `node devtools/phase11_tagname_test.mjs` |
+| `wd14_api_test.py` | WD14 反推後端 API 測試（17 項：格式/大小/Worker 啟動/崩潰重啟/併發/暫存清理） | `& 'C:\ComfyUI\tools\wd14-venv\Scripts\python.exe' devtools/wd14_api_test.py` |
+| `wd14_ui_test.mjs` | WD14 前端測試（17 項：版面/反推 Modal/加入標籤不覆蓋 sel 與 #pos/去重/Rating 不入提示詞） | `node devtools/wd14_ui_test.mjs` |
+| `wd14_gen_test.mjs` | 成人向圖片呈現 + 真實生成流程不受影響 + 生圖中反推仍可用 | `node devtools/wd14_gen_test.mjs` |
+| `wd14_race_test.py` | Worker 跨行程 pending 競態測試（21 項：slot 綁定 process／舊 Worker 延遲退出不污染新 Worker／崩潰後重啟） | `& 'C:\ComfyUI\tools\wd14-venv\Scripts\python.exe' devtools/wd14_race_test.py` |
+| `wd14_tmpfile_test.py` | 暫存圖生命週期測試（9 項：成功即刪／逾時保留／崩潰保留／TTL 清理） | `& 'C:\ComfyUI\tools\wd14-venv\Scripts\python.exe' devtools/wd14_tmpfile_test.py` |
+| `wd14_ui_429_test.mjs` | 429 忙碌提示測試（10 項：忙碌文案不冠「反推失敗」＋其他錯誤分類不變） | `node devtools/wd14_ui_429_test.mjs` |
+| `wd14_perf_test.py` | 效能量測（執行緒上限／待機與生圖中延遲／Worker RSS），**不屬於回歸測試** | `& 'C:\ComfyUI\tools\wd14-venv\Scripts\python.exe' devtools/wd14_perf_test.py` |
 
 前置條件：`server.py`（7860）與 ComfyUI（8188）都要開著。
 
@@ -27,9 +34,16 @@
 - `_gen_report.json` — 生成流程驗收（分類數量、進度、燈箱）
 - `_phase11_test_report.json` — Phase 1.1 的 10 項測試結果
 
+`wd14_review/` 是 Task 2（圖片反推）的驗收紀錄：
+
+- `wd14_ui_test_report.json` — 前端 17 項測試結果
+- `wd14_gen_test_report.json` — 生成流程與成人向呈現測試結果
+- `wd14_ui_429_test_report.json` — 429 忙碌提示 10 項測試結果
+
 ## 保留在磁碟、不進版控
 
 - `phase1_final_review/*.png` — 驗收截圖，由 `phase1_capture.mjs` 重新產生
+- `wd14_review/*.png` — 反推 Modal 截圖，由 `wd14_ui_test.mjs` 重新產生
 - `phase1_ui_review.pdf` — Phase 1 視覺驗收 PDF
 - `uiux_prototype/` — Phase 0.5 UI/UX 原型，已被正式版取代
 

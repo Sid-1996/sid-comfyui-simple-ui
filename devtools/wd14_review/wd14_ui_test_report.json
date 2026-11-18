@@ -1,0 +1,277 @@
+{
+  "results": [
+    {
+      "id": "V1",
+      "name": "1920x1080 頁面沒有垂直/水平捲動",
+      "pass": true,
+      "detail": {
+        "innerWidth": 1920,
+        "innerHeight": 1080,
+        "scrollH": 1080,
+        "clientH": 1080,
+        "scrollW": 1920,
+        "clientW": 1920,
+        "libFoot": {
+          "scrollH": 292,
+          "clientH": 292,
+          "rect": {
+            "w": 478,
+            "h": 293,
+            "x": 25,
+            "y": 680
+          }
+        },
+        "cats": {
+          "scrollH": 144,
+          "clientH": 144,
+          "rect": {
+            "w": 478,
+            "h": 144,
+            "x": 25,
+            "y": 147
+          }
+        },
+        "tags": {
+          "scrollH": 389,
+          "clientH": 389,
+          "rect": {
+            "w": 478,
+            "h": 389,
+            "x": 25,
+            "y": 291
+          }
+        },
+        "topbar": {
+          "w": 1920,
+          "h": 64,
+          "x": 0,
+          "y": 0
+        },
+        "actionbar": {
+          "w": 1920,
+          "h": 88,
+          "x": 0,
+          "y": 992
+        },
+        "revBtn": {
+          "w": 92,
+          "h": 30,
+          "x": 1752,
+          "y": 17
+        }
+      }
+    },
+    {
+      "id": "V2",
+      "name": "左欄與右欄都沒有被裁切",
+      "pass": true,
+      "detail": {
+        "libFoot": {
+          "scrollH": 292,
+          "clientH": 292,
+          "rect": {
+            "w": 478,
+            "h": 293,
+            "x": 25,
+            "y": 680
+          }
+        },
+        "cats": {
+          "scrollH": 144,
+          "clientH": 144,
+          "rect": {
+            "w": 478,
+            "h": 144,
+            "x": 25,
+            "y": 147
+          }
+        },
+        "tags": {
+          "scrollH": 389,
+          "clientH": 389,
+          "rect": {
+            "w": 478,
+            "h": 389,
+            "x": 25,
+            "y": 291
+          }
+        }
+      }
+    },
+    {
+      "id": "V3",
+      "name": "頂列有「圖片反推」入口且可見",
+      "pass": true,
+      "detail": {
+        "hasBtn": true
+      }
+    },
+    {
+      "id": "F0",
+      "name": "測試前已備妥既有選取與補充描述",
+      "pass": true,
+      "detail": {
+        "selBefore": [
+          "1girl",
+          "smile"
+        ],
+        "posBefore": "櫻花 夜晚"
+      }
+    },
+    {
+      "id": "F1a",
+      "name": "點入口會開反推 Modal",
+      "pass": true,
+      "detail": {
+        "modalOpen": true
+      }
+    },
+    {
+      "id": "F1b",
+      "name": "一般圖反推出一般標籤",
+      "pass": true,
+      "detail": {
+        "tagCount": 40
+      }
+    },
+    {
+      "id": "F2",
+      "name": "Rating 分級有顯示出來",
+      "pass": true,
+      "detail": {
+        "hidden": false,
+        "text": "內容分級：general（98%，只供參考）"
+      }
+    },
+    {
+      "id": "F3",
+      "name": "點標籤可取消/選取",
+      "pass": true,
+      "detail": {
+        "before": true,
+        "after": false,
+        "name": "1girl",
+        "restored": true
+      }
+    },
+    {
+      "id": "F4",
+      "name": "全選/全取消可用",
+      "pass": true,
+      "detail": {
+        "off": 0,
+        "on": 40,
+        "total": 40,
+        "applyTextAfterNone": "加入提示詞（0）"
+      }
+    },
+    {
+      "id": "F5",
+      "name": "加入標籤不會覆蓋既有選取（原有標籤都還在且有新增）",
+      "pass": true,
+      "detail": {
+        "before": [
+          "1girl",
+          "smile"
+        ],
+        "after": [
+          "1girl",
+          "smile",
+          "solo",
+          "school uniform",
+          "indoors",
+          "window",
+          "long hair",
+          "blue eyes",
+          "classroom",
+          "looking at viewer",
+          "black hair",
+          "serafuku",
+          "skirt",
+          "sitting",
+          "blush",
+          "curtains",
+          "white shirt",
+          "pleated skirt",
+          "grin",
+          "sunlight",
+          "day"
+        ]
+      }
+    },
+    {
+      "id": "F6",
+      "name": "加入標籤不會覆蓋原有 #pos 內容",
+      "pass": true,
+      "detail": {
+        "before": "櫻花 夜晚",
+        "after": "櫻花 夜晚, desk, school desk, chair, sailor collar, tree, short sleeves, school chair, shirt, head rest, hand on own face, elbow rest, school, hand on own cheek, black sailor collar, red neckerchief, neckerchief, blue sailor collar, blue skirt, black skirt"
+      }
+    },
+    {
+      "id": "F8",
+      "name": "Rating 不會進正向提示詞",
+      "pass": true,
+      "detail": {
+        "ratingWord": "general",
+        "prompt": "1girl, smile, solo, school uniform, indoors, window, long hair, blue eyes, classroom, looking at viewer, black hair, serafuku, skirt, sitting, blush, curtains, white shirt, pleated skirt, grin, sunlight, day, cherry blossoms, night, desk, school desk, chair, sailor collar, tree, short sleeves, school chair, shirt, head rest, hand on own face, elbow rest, school, hand on own cheek, black sailor collar, red neckerchief, neckerchief, blue sailor collar, blue skirt, black skirt"
+      }
+    },
+    {
+      "id": "F5b",
+      "name": "套用後 Modal 有自動關閉",
+      "pass": true,
+      "detail": {
+        "modalClosed": true
+      }
+    },
+    {
+      "id": "F7",
+      "name": "同一批標籤再加入一次不會重複",
+      "pass": true,
+      "detail": {
+        "countBefore": 21,
+        "countAfter": 21,
+        "posBefore": "櫻花 夜晚, desk, school desk, chair, sailor collar, tree, short sleeves, school chair, shirt, head rest, hand on own face, elbow rest, school, hand on own cheek, black sailor collar, red neckerchief, neckerchief, blue sailor collar, blue skirt, black skirt",
+        "posAfter": "櫻花 夜晚, desk, school desk, chair, sailor collar, tree, short sleeves, school chair, shirt, head rest, hand on own face, elbow rest, school, hand on own cheek, black sailor collar, red neckerchief, neckerchief, blue sailor collar, blue skirt, black skirt"
+      }
+    },
+    {
+      "id": "F9",
+      "name": "反推流程沒有改動生成按鈕狀態",
+      "pass": true,
+      "detail": {
+        "goDisabled": false,
+        "sel": 21
+      }
+    },
+    {
+      "id": "V4",
+      "name": "反推 Modal 沒有超出視窗",
+      "pass": true,
+      "detail": {
+        "w": 1060,
+        "h": 578,
+        "x": 430,
+        "y": 251,
+        "bottom": 829,
+        "right": 1490,
+        "fitsViewport": true
+      }
+    },
+    {
+      "id": "V5",
+      "name": "Console 沒有錯誤",
+      "pass": true,
+      "detail": {
+        "consoleErrors": [],
+        "pageErrors": []
+      }
+    }
+  ],
+  "summary": {
+    "total": 17,
+    "passed": 17,
+    "failed": []
+  }
+}

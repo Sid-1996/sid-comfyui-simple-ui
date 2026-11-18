@@ -27,6 +27,10 @@
     <button id="statusPill" class="status-pill" type="button" title="ComfyUI 連線狀態">
       <span class="dot"></span><span id="statusText">檢查 ComfyUI…</span>
     </button>
+    <button id="btnReverse" class="btn btn-ghost btn-sm" type="button" title="用圖片反推標籤（WD14）">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5V6a2 2 0 0 1 2-2h2.5M15.5 4H18a2 2 0 0 1 2 2v2.5M20 15.5V18a2 2 0 0 1-2 2h-2.5M8.5 20H6a2 2 0 0 1-2-2v-2.5"/><circle cx="12" cy="12" r="3.1"/></svg>
+      圖片反推
+    </button>
     <button id="btnHelp" class="btn btn-ghost btn-icon" type="button" aria-label="使用說明" title="使用說明 (?)">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .9-1 1.6v.3"/><circle cx="12" cy="17" r="1"/></svg>
     </button>
@@ -226,6 +230,69 @@
   </div>
 </div>
 
+<!-- ── 圖片反推（WD14 EVA02） ────────────────────────── -->
+<div id="revModal" class="modal" hidden>
+  <div class="modal-card modal-card-lg" role="dialog" aria-modal="true" aria-labelledby="revTitle">
+    <div class="modal-head">
+      <h2 id="revTitle">圖片反推標籤</h2>
+      <button id="revClose" class="btn btn-ghost btn-icon" type="button" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="rev-grid">
+
+        <div class="rev-left">
+          <div id="revDrop" class="rev-drop" tabindex="0" role="button" aria-label="選擇或拖曳圖片">
+            <img id="revPreview" class="rev-preview" alt="" hidden>
+            <div id="revHint" class="rev-hint">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+              <p>把圖片拖進來<br>或點這裡選一張</p>
+              <p class="meta">支援 PNG、JPG、WebP</p>
+            </div>
+          </div>
+          <p id="revFileMeta" class="meta"></p>
+          <button id="revRun" class="btn btn-primary" type="button" disabled>反推標籤</button>
+          <p id="revStatus" class="rev-status" role="status"></p>
+          <div id="revError" class="rev-error" hidden></div>
+        </div>
+
+        <div class="rev-right">
+          <div id="revRating" class="rev-rating" hidden></div>
+
+          <section class="rev-group">
+            <div class="rev-group-head">
+              <h3>一般標籤 <span id="revGeneralCount" class="meta"></span></h3>
+              <div class="rev-group-acts">
+                <button type="button" class="btn btn-ghost btn-sm" data-all="general">全選</button>
+                <button type="button" class="btn btn-ghost btn-sm" data-none="general">全取消</button>
+              </div>
+            </div>
+            <div id="revGeneral" class="rev-tags"></div>
+          </section>
+
+          <section class="rev-group">
+            <div class="rev-group-head">
+              <h3>角色標籤 <span id="revCharCount" class="meta"></span></h3>
+              <div class="rev-group-acts">
+                <button type="button" class="btn btn-ghost btn-sm" data-all="character">全選</button>
+                <button type="button" class="btn btn-ghost btn-sm" data-none="character">全取消</button>
+              </div>
+            </div>
+            <div id="revCharacter" class="rev-tags"></div>
+          </section>
+
+          <p class="meta">分級只供參考，不會加進提示詞。勾選想用的標籤，再按右下角的「加入提示詞」。</p>
+        </div>
+      </div>
+
+      <div class="modal-foot">
+        <span id="revFootMeta" class="meta" style="margin-right:auto"></span>
+        <button type="button" class="btn btn-ghost" id="revClose2">關閉</button>
+        <button type="button" class="btn btn-soft" id="revApply" disabled>加入提示詞（0）</button>
+      </div>
+    </div>
+  </div>
+  <input id="revFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+</div>
 <!-- ── 說明 / 提示詞視窗 ─────────────────────────────── -->
 <div id="modal" class="modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">

@@ -77,6 +77,14 @@
   const els = {};
   let scrollSeed = 0;
 
+  // 標籤比對用的正規化：底線與空格互通、大小寫不拘、空白收斂
+  // 有些分類用「a/b」表示兩個同義標籤，比對時拆開看
+  function tagAlts(s) {
+    return String(s || "").toLowerCase().split("/")
+      .map(x => x.trim().replace(/[_\s]+/g, " ").trim())
+      .filter(Boolean);
+  }
+
   function save() {
     try {
       localStorage.setItem("sel", JSON.stringify(state.sel));
@@ -171,6 +179,90 @@
   function commit() {
     save();
     renderAll(true);
+  }
+
+  /* ── 隨機配對：分類 slot 產生器 ─────────────────────────── */
+  // 正規化：底線／空白互通、大小寫不拘（比對用）
+  function norm(s) { return String(s || "").toLowerCase().replace(/[_\s]+/g, " ").trim(); }
+  function exactIn(e, list) { const n = norm(e); return list.some(x => norm(x) === n); }
+  function isAdultCat(c) { return /^成人[·向]/.test(c); }
+
+  // 名義上放在一般分類、內容其實是成人的標籤。
+  // 不靠 isAdult()：它抓 L 裡第一個同名分類，同時出現在一般與成人分類時會誤判。
+  const ADULTISH = new Set([
+    "ahegao", "extreme ahegao", "tongue out long", "heavy drooling", "rolling eyes",
+    "mind break expression", "mind broken pleasure expression", "naughty_face",
+    "cute seductive expression", "cute yet seductive expression", "flushed face",
+    "no panties", "completely nude from waist down", "sexy lingerie",
+    "sundress pulled down to waist",
+    "straddling", "cowgirl position", "riding deeply", "hips lowered",
+    "hands gripping her own thighs", "fingers mostly hidden behind legs"
+  ].map(norm));
+
+  const HAIR_COLORS = ["black", "brown", "blonde", "silver", "white", "pink", "blue", "red", "purple", "green", "gradient", "multicolored"];
+  const HAIR_ORNAMENT = ["hair ribbon", "hairband", "hair flower", "hair ornament", "black hairband", "one side up", "single side bun"];
+  const EYE_COLORS = ["blue eyes", "red eyes", "green eyes", "purple eyes", "yellow eyes", "brown eyes", "pink eyes", "heterochromia"];
+  const NOT_EYE = ["closed eyes", "half-closed eyes", "glowing eyes", "sparkling eyes", "long eyelashes", "delicate eyelashes"];
+  const FOOTWEAR = ["thighhighs", "pantyhose", "stockings", "kneehighs", "loafers", "boots", "high heels", "sneakers", "sandals", "barefoot"];
+  const COMPOSITION = ["full body", "upper body", "cowboy shot", "portrait", "close-up", "from above", "from below", "from side", "from behind", "dutch angle", "wide shot"];
+  const LIGHTING = ["depth of field", "bokeh", "lens flare", "backlighting", "rim light", "cinematic lighting", "soft lighting", "sunlight", "dramatic lighting", "motion blur", "dramatic rim lighting", "soft volumetric lighting", "delicate shadows", "stunning light and shadow", "soft glow", "sparkles", "beautiful caustics"];
+  // 場景抽兩個時要避免的矛盾（室內/室外、白天/夜晚）
+  const SCENE_EXCL = [["outdoors", "indoors"], ["day", "night", "sunset", "sunrise", "dusk"]];
+  // 成人池權重：軟性分類高、R18 低（R18 標籤數量壓倒性，均抽會每次都中它）
+  const ADULT_WEIGHT = { "成人向": 5, "成人·服裝內衣": 4, "成人·動作": 4, "成人·五官表情": 3, "成人·身體": 3, "成人·襪子腿飾": 2, "成人·常用組合": 2, "成人·R18": 1 };
+
+  // 把標籤庫切成互不衝突的 family（一個 family 就是一個 slot）
+  function buildPools() {
+    const p = {};
+    const add = (k, e) => { (p[k] || (p[k] = [])).push(e); };
+    L.forEach(x => {
+      const e = x.e, n = norm(e);
+      if (isAdultCat(x.c) || ADULTISH.has(n)) return; // 成人統一由 adult slot 處理
+      if (x.c === "常用" || /^已學習·/.test(x.c)) return; // 品質標籤／反推雜訊不進池
+      switch (x.c) {
+        case "人物":
+          if (n !== "solo" && n !== "denia") add("char", e);
+          break;
+        case "頭髮":
+          if (exactIn(e, HAIR_ORNAMENT)) add("hairOrna", e);
+          else if (HAIR_COLORS.some(k => n.includes(k))) add("hairColor", e);
+          else add("hairStyle", e);
+          break;
+        case "臉&表情":
+          if (exactIn(e, EYE_COLORS)) add("eyes", e);
+          else if (!exactIn(e, NOT_EYE) && !n.includes("eyes") && !n.includes("eyelashes")) add("face", e);
+          break;
+        case "服裝": add("outfit", e); break;
+        case "配件":
+          if (FOOTWEAR.some(k => n.includes(k))) add("foot", e);
+          else add("acc", e);
+          break;
+        case "動作": add("pose", e); break;
+        case "構圖&光影":
+          if (exactIn(e, COMPOSITION)) add("comp", e);
+          else if (exactIn(e, LIGHTING)) add("light", e);
+          break;
+        case "場景": add("scene", e); break;
+        case "風格": add("style", e); break;
+      }
+    });
+    return p;
+  }
+
+  function pickAdultTag() {
+    const groups = {};
+    L.forEach(x => {
+      const c = isAdultCat(x.c) ? x.c : (ADULTISH.has(norm(x.e)) ? "成人向" : null);
+      if (c) (groups[c] || (groups[c] = [])).push(x.e);
+    });
+    const names = Object.keys(groups);
+    if (!names.length) return null;
+    const weights = names.map(c => ADULT_WEIGHT[c] || 2);
+    let r = Math.random() * weights.reduce((a, b) => a + b, 0);
+    let ci = 0;
+    for (; ci < weights.length; ci++) { r -= weights[ci]; if (r < 0) break; }
+    const pool = groups[names[Math.min(ci, names.length - 1)]];
+    return pool[Math.floor(Math.random() * pool.length)];
   }
 
   /* ── 對外 API ───────────────────────────────────────────── */
@@ -361,6 +453,41 @@
       commit();
     },
 
+    /** 增量加入標籤：不清空、不替換既有選取。回傳實際加入的數量。 */
+    addTags(tags) {
+      const list = Array.isArray(tags) ? tags : (tags ? [tags] : []);
+      let added = 0;
+      list.forEach(raw => {
+        const t = String(raw || "").trim();
+        if (!t || t.includes(",")) return;
+        if (state.sel.some(s => s.t === t)) return;
+        state.sel.push({ t, w: 1 });
+        added++;
+      });
+      if (added) commit();
+      return added;
+    },
+
+    /** 反推標籤（底線形式）對應標籤庫裡的英文標籤；找不到回 null。 */
+    matchTag(tag) {
+      const want = tagAlts(tag);
+      if (!want.length) return null;
+      for (const x of L) {
+        if (tagAlts(x.e).some(h => want.includes(h))) return x.e;
+      }
+      return null;
+    },
+
+    /** 標籤庫裡的中文名（沒有就回空字串） */
+    tagZh(tag) { return Z[tag] || ""; },
+
+    /** 這個標籤在標籤庫裡是不是成人向分類 */
+    isAdult(tag) {
+      const e = this.matchTag(tag) || tag;
+      for (const x of L) if (x.e === e) return /^成人[·向]/.test(x.c);
+      return false;
+    },
+
     clear() {
       state.sel = [];
       if ($("pos")) $("pos").value = "";
@@ -428,10 +555,56 @@
     },
 
     applyRandomCombo() {
-      const c = COMBOS[Math.floor(Math.random() * COMBOS.length)];
-      state.sel = c[1].split(",").map(t => ({ t: t.trim(), w: 1 })).filter(x => x.t);
+      const p = buildPools();
+      const out = [];
+      const conflicts = (t, groups) => groups.some(g =>
+        g.some(x => norm(x) === norm(t)) && out.some(c => g.some(x => norm(x) === norm(c))));
+      // 從一個 family 不重複抽 n 個；groups 可排除既有衝突（例如室內 + 室外）
+      const take = (key, n, groups) => {
+        const copy = (p[key] || []).slice();
+        let got = 0;
+        while (got < n && copy.length) {
+          const t = copy.splice(Math.floor(Math.random() * copy.length), 1)[0];
+          if (groups && conflicts(t, groups)) continue;
+          out.push(t);
+          got++;
+        }
+      };
+
+      // 骨架：每個 family 只抽一次 → 天然避開長髮+短髮、藍眼+紅眼、制服+和服等矛盾
+      take("char", 1);
+      take("hairStyle", 1);
+      take("hairColor", 1);
+      take("face", 1);
+      take("eyes", Math.random() < 0.7 ? 1 : 0);
+      take("outfit", 1);
+      take("foot", Math.random() < 0.5 ? 1 : 0);
+      take("acc", Math.random() < 0.5 ? 1 : 0);
+      take("pose", 1);
+      take("comp", 1);
+      take("light", Math.random() < 0.7 ? 1 : 0);
+      take("scene", 1 + (Math.random() < 0.4 ? 1 : 0), SCENE_EXCL);
+      take("style", Math.random() < 0.6 ? 1 : 0);
+
+      // 成人：完全跟著 18+ 開關；開時抽 1~2 個，軟性分類權重較高
+      if (state.adult) {
+        const n = 1 + (Math.random() < 0.5 ? 1 : 0);
+        for (let i = 0; i < n; i++) {
+          const t = pickAdultTag();
+          if (t) out.push(t);
+        }
+      }
+
+      // 去重（同名標籤可能同時出現在不同分類），並維持既有 {t, w} 格式
+      const seen = new Set();
+      state.sel = out.map(t => String(t).trim()).filter(t => {
+        const k = norm(t);
+        if (!t || seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      }).map(t => ({ t, w: 1 }));
       commit();
-      return c[0];
+      return state.adult ? "隨機組合（18+）" : "隨機組合";
     },
 
     combos() { return COMBOS.map(c => c[0]); },

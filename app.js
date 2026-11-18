@@ -195,6 +195,20 @@
     $("stageResults").hidden = which !== "results";
   }
 
+  /* ── 隨機配一組：標籤 + 補充描述 + 種子一起換 ─────────── */
+  function surpriseCombo() {
+    const name = window.Tags.applyRandomCombo();
+    const pos = $("pos");
+    if (pos) {
+      pos.value = "";
+      try { localStorage.removeItem("ui.extra"); } catch (e) { /* 無痕模式 */ }
+    }
+    $("seed").value = String(Math.floor(Math.random() * 4294967295));
+    updateWarn();
+    syncGo();
+    return name;
+  }
+
   /* ── 生成 ──────────────────────────────────────────────── */
   function composePrompt() {
     const base = window.Tags.buildPrompt();
@@ -222,7 +236,7 @@
 
     // 防呆：什麼都沒選就自動配一組，不讓使用者卡住
     if (!window.Tags.hasContent()) {
-      const name = window.Tags.applyRandomCombo();
+      const name = surpriseCombo();
       toast(`幫你套用了「${name}」`, "ok");
     }
 
@@ -723,6 +737,254 @@
       : "";
   }
 
+  /* ── 圖片反推（WD14 EVA02）───────────────────────────────── */
+  const RV = {
+    file: null, dataUrl: "", running: false,
+    rating: null, general: [], character: [], timing: null,
+    picked: new Set()
+  };
+
+  // 提示詞去重用的正規化：底線與空格視為同一個標籤
+  function normKey(s) {
+    return String(s || "").toLowerCase().trim().replace(/[_\s]+/g, " ");
+  }
+
+  function rvResetResult() {
+    RV.rating = null; RV.general = []; RV.character = []; RV.timing = null;
+    RV.picked = new Set();
+    $("revRating").hidden = true;
+    $("revGeneral").innerHTML = "";
+    $("revCharacter").innerHTML = "";
+    $("revGeneralCount").textContent = "";
+    $("revCharCount").textContent = "";
+    $("revFootMeta").textContent = "";
+    rvUpdateApply();
+  }
+
+  function rvUpdateApply() {
+    const n = RV.picked.size;
+    $("revApply").disabled = n === 0;
+    $("revApply").textContent = "加入提示詞（" + n + "）";
+  }
+
+  function rvError(msg) {
+    const el = $("revError");
+    el.textContent = msg;
+    el.hidden = false;
+  }
+
+  function rvExplain(e) {
+    const m = String((e && e.message) || e);
+    // 忙碌（429）不是失敗：直接顯示後端的白話訊息，不要冠「反推失敗」
+    if (/太多|等一下再試|稍等|忙碌/.test(m)) return m;
+    if (/逾時/.test(m)) return "分析太久了，這次沒等到結果。按「反推標籤」再試一次，或換張小一點的圖。";
+    if (/Worker|worker|503|502/.test(m)) return "反推服務沒回應，按一下 F5 重新整理再試。";
+    if (/只認|格式/.test(m)) return "這個檔案格式不行，請換 PNG 或 JPG 圖片。";
+    if (/太大/.test(m)) return "圖片太大囉，換小一點的再試（最長邊 1024px 會自動縮）。";
+    if (/太小/.test(m)) return "這張圖太小了，看不出內容，換大一點的試試。";
+    if (/壞了|空的/.test(m)) return "圖片資料有問題，重新選一次圖片就好。";
+    return "反推失敗：" + m;
+  }
+
+  function rvDownscale(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const max = 1024;
+        const w0 = img.naturalWidth || img.width;
+        const h0 = img.naturalHeight || img.height;
+        if (!w0 || !h0 || Math.max(w0, h0) <= max) { resolve(dataUrl); return; }
+        const k = max / Math.max(w0, h0);
+        const w = Math.max(1, Math.round(w0 * k));
+        const h = Math.max(1, Math.round(h0 * k));
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        const ctx = cv.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+        try { resolve(cv.toDataURL("image/png")); } catch (e) { reject(e); }
+      };
+      img.onerror = () => reject(new Error("decode failed"));
+      img.src = dataUrl;
+    });
+  }
+
+  function rvPick(file) {
+    if (!file) return;
+    $("revError").hidden = true;
+    if (!/^image\//.test(file.type || "")) {
+      rvError("這不是圖片，請選 PNG、JPG 或 WebP。");
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      rvError("圖片太大了（上限 20 MB），請換小一點的。");
+      return;
+    }
+    RV.file = file;
+    RV.dataUrl = "";
+    rvResetResult();
+    const reader = new FileReader();
+    reader.onerror = () => rvError("圖片讀取失敗，換一張試試。");
+    reader.onload = () => {
+      rvDownscale(reader.result).then(url => {
+        RV.dataUrl = url;
+        $("revPreview").src = url;
+        $("revPreview").hidden = false;
+        $("revHint").hidden = true;
+        $("revFileMeta").textContent = file.name + " · " +
+          Math.max(1, Math.round(file.size / 1024)) + " KB";
+        $("revRun").disabled = false;
+        $("revStatus").textContent = "準備好了，按「反推標籤」開始。";
+      }).catch(() => rvError("圖片讀取失敗，換一張試試。"));
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function rvRun() {
+    if (RV.running || !RV.dataUrl) return;
+    RV.running = true;
+    $("revRun").disabled = true;
+    $("revRun").textContent = "分析中…";
+    $("revError").hidden = true;
+    $("revStatus").textContent = "正在分析圖片，大約要 5～15 秒，請稍等…";
+    try {
+      const r = await fetch("/api/reverse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image: RV.dataUrl, threshold: 0.35, character_threshold: 0.85
+        })
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+      RV.rating = j.rating || null;
+      RV.general = Array.isArray(j.general) ? j.general : [];
+      RV.character = Array.isArray(j.character) ? j.character : [];
+      RV.timing = j.timing || {};
+      rvRender();
+      const n = RV.general.length + RV.character.length;
+      $("revStatus").textContent = n
+        ? ("找到 " + n + " 個標籤，取消不要的，再按「加入提示詞」。")
+        : "這張圖沒找到標籤，換一張試試。";
+    } catch (e) {
+      rvError(rvExplain(e));
+      $("revStatus").textContent = "";
+    } finally {
+      RV.running = false;
+      $("revRun").disabled = !RV.dataUrl;
+      $("revRun").textContent = "反推標籤";
+      rvUpdateApply();
+    }
+  }
+
+  function rvRenderGroup(id, list, kind) {
+    const el = $(id);
+    if (!list.length) {
+      el.innerHTML = kind === "character"
+        ? "<div class=\"rev-empty\">這張圖沒有認出特定角色。</div>"
+        : "<div class=\"rev-empty\">沒有一般標籤。</div>";
+      return;
+    }
+    el.innerHTML = list.map(t => {
+      const label = String(t.name || "").replace(/_/g, " ");
+      const lib = window.Tags.matchTag(t.name);
+      const zh = lib ? window.Tags.tagZh(lib) : "";
+      const tip = zh ? (zh + " · " + t.name) : t.name;
+      const adult = window.Tags.isAdult(t.name);
+      return "<button type=\"button\" class=\"rev-tag" + (adult ? " adult" : "") + "\" " +
+        "data-kind=\"" + kind + "\" data-name=\"" + esc(t.name) + "\" title=\"" + esc(tip) + "\">" +
+        "<span>" + esc(label) + "</span><i>" + Math.round((t.score || 0) * 100) + "</i></button>";
+    }).join("");
+  }
+
+  function rvRender() {
+    const r = RV.rating;
+    if (r && r.name) {
+      $("revRating").hidden = false;
+      $("revRating").innerHTML = "內容分級：<b>" + esc(r.name) + "</b>" +
+        "<span class=\"meta\">（" + Math.round((r.score || 0) * 100) + "%，只供參考）</span>";
+    } else {
+      $("revRating").hidden = true;
+    }
+    $("revGeneralCount").textContent = RV.general.length ? ("（" + RV.general.length + "）") : "";
+    $("revCharCount").textContent = RV.character.length ? ("（" + RV.character.length + "）") : "";
+    rvRenderGroup("revGeneral", RV.general, "general");
+    rvRenderGroup("revCharacter", RV.character, "character");
+    // 預設全選，使用者再取消不要的
+    RV.picked = new Set();
+    RV.general.forEach(t => RV.picked.add(t.name));
+    RV.character.forEach(t => RV.picked.add(t.name));
+    document.querySelectorAll("#revModal .rev-tag").forEach(b => {
+      b.classList.toggle("on", RV.picked.has(b.dataset.name));
+    });
+    const t = RV.timing || {};
+    const bits = [];
+    if (t.inference_seconds) bits.push("推論 " + t.inference_seconds + "s");
+    if (t.total_seconds) bits.push("合計 " + t.total_seconds + "s");
+    $("revFootMeta").textContent = bits.join(" · ");
+    rvUpdateApply();
+  }
+
+  function rvToggleTag(e) {
+    const b = e.target.closest(".rev-tag");
+    if (!b) return;
+    const name = b.dataset.name;
+    if (RV.picked.has(name)) RV.picked.delete(name);
+    else RV.picked.add(name);
+    b.classList.toggle("on", RV.picked.has(name));
+    rvUpdateApply();
+  }
+
+  function rvSetAll(kind, on) {
+    const list = kind === "character" ? RV.character : RV.general;
+    const el = kind === "character" ? $("revCharacter") : $("revGeneral");
+    list.forEach(t => { if (on) RV.picked.add(t.name); else RV.picked.delete(t.name); });
+    el.querySelectorAll(".rev-tag").forEach(b => {
+      b.classList.toggle("on", RV.picked.has(b.dataset.name));
+    });
+    rvUpdateApply();
+  }
+
+  function rvApply() {
+    if (!RV.picked.size) { toast("先勾選想加的標籤", "warn"); return; }
+    const have = new Set(window.Tags.selected().map(s => normKey(s.t)));
+    const posRaw = ($("pos").value || "");
+    const inPos = new Set(posRaw.split(",").map(s => normKey(s)).filter(Boolean));
+    const libTags = [];
+    const extraTags = [];
+    RV.picked.forEach(name => {
+      const lib = window.Tags.matchTag(name);
+      if (lib) {
+        // 標籤庫有的 → 進已選標籤（不覆蓋既有選取）
+        if (!have.has(normKey(lib)) && !inPos.has(normKey(lib))) libTags.push(lib);
+      } else {
+        // 標籤庫沒有的 → 進補充描述
+        const label = String(name).replace(/_/g, " ");
+        if (!inPos.has(normKey(label)) && !have.has(normKey(label))) extraTags.push(label);
+      }
+    });
+    const addedSel = window.Tags.addTags(libTags);
+    let addedExtra = 0;
+    if (extraTags.length) {
+      const base = posRaw.trim();
+      const merged = (base ? base + ", " : "") + extraTags.join(", ");
+      $("pos").value = merged;
+      try { localStorage.setItem("ui.extra", merged); } catch (e) { /* 無痕模式 */ }
+      addedExtra = extraTags.length;
+      updateWarn();
+    }
+    syncGo();
+    closeReverse();
+    const total = addedSel + addedExtra;
+    if (total) toast("已加入 " + total + " 個標籤", "ok");
+    else toast("這些標籤都已經有了，沒有重複加入", "warn");
+  }
+
+  function openReverse() {
+    $("revModal").hidden = false;
+    $("revRun").disabled = !RV.dataUrl;
+  }
+
+  function closeReverse() { $("revModal").hidden = true; }
   /* ── 初始化 ────────────────────────────────────────────── */
   function init() {
     window.Tags.init();
@@ -794,10 +1056,45 @@
     $("btnClear").onclick = () => { window.Tags.clear(); updateWarn(); syncGo(); };
     $("btnPreview").onclick = showPromptModal;
     $("btnHelp").onclick = showHelp;
+    // 圖片反推（WD14）
+    $("btnReverse").onclick = openReverse;
+    $("revClose").onclick = closeReverse;
+    $("revClose2").onclick = closeReverse;
+    $("revRun").onclick = rvRun;
+    $("revApply").onclick = rvApply;
+    $("revModal").onclick = e => { if (e.target.id === "revModal") closeReverse(); };
+    $("revGeneral").onclick = rvToggleTag;
+    $("revCharacter").onclick = rvToggleTag;
+    $("revDrop").onclick = () => $("revFile").click();
+    $("revDrop").onkeydown = e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("revFile").click(); }
+    };
+    $("revDrop").ondragover = e => { e.preventDefault(); $("revDrop").classList.add("over"); };
+    $("revDrop").ondragleave = () => $("revDrop").classList.remove("over");
+    $("revDrop").ondrop = e => {
+      e.preventDefault();
+      $("revDrop").classList.remove("over");
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      rvPick(f);
+    };
+    $("revFile").onchange = e => {
+      const f = e.target.files && e.target.files[0];
+      rvPick(f);
+      e.target.value = "";
+    };
+    $("revModal").querySelectorAll("[data-all]").forEach(b => {
+      b.onclick = () => rvSetAll(b.dataset.all, true);
+    });
+    $("revModal").querySelectorAll("[data-none]").forEach(b => {
+      b.onclick = () => rvSetAll(b.dataset.none, false);
+    });
+    // 圖片拖到視窗空白處時，不要讓瀏覽器直接開圖
+    window.addEventListener("dragover", e => e.preventDefault());
+    window.addEventListener("drop", e => e.preventDefault());
+
     $("btnRandom").onclick = () => {
-      const n = window.Tags.applyRandomCombo();
+      const n = surpriseCombo();
       toast(`套用「${n}」`, "ok");
-      syncGo();
     };
     $("btnEmptyRandom").onclick = () => { $("btnRandom").click(); };
     $("btnEmptyCombo").onclick = () => {
@@ -895,6 +1192,7 @@
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); return; }
       if (e.key === "Escape") {
         if (!$("lightbox").hidden) return closeLightbox();
+        if (!$("revModal").hidden) return closeReverse();
         if (!$("advModal").hidden) return $("advClose").click();
         if (!$("modal").hidden) return closeModal();
         if (S.running) cancel();
