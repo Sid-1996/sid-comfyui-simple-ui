@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+logs/
+
+# CodeGraph index (local only)
+.codegraph/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Output
+ComfyUI_output/
+D:/ComfyUI_output/
+
+# Raw generated intermediates
+assets/raw/

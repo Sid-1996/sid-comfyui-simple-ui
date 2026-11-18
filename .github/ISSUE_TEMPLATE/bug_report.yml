@@ -1,0 +1,27 @@
+name: Bug 回報
+description: 回報介面或 server 的問題
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 發生了什麼
+      description: 簡述問題與預期行為
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 重現步驟
+      placeholder: "1. 開啟 ...\n2. 點擊 ...\n3. 看到 ..."
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / 瀏覽器
+      placeholder: "Chrome 130, Windows 11"
+  - type: textarea
+    id: console
+    attributes:
+      label: Console / server log
+      render: shell
