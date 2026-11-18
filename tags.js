@@ -95,7 +95,8 @@
   function renderCats() {
     const counts = {};
     L.forEach(x => { counts[x.c] = (counts[x.c] || 0) + 1; });
-    const isSecondary = (c) => /^成人[·向]/.test(c) || /^已學習·/.test(c);
+    // 成人分類在 18+ 開啟時直接顯示為主要分類，不再收合
+    const isSecondary = (c) => /^已學習·/.test(c);
     const primary = CATS.map(([c]) => c).filter(c => !isSecondary(c) && (!/^成人[·向]/.test(c) || state.adult));
     const secondary = CATS.map(([c]) => c).filter(c => isSecondary(c) && (!/^成人[·向]/.test(c) || state.adult));
     const renderBtn = (c) => {
@@ -132,7 +133,7 @@
     }
 
     els.tags.innerHTML = items.map(x =>
-      `<button type="button" class="tag${on.has(x.e) ? " on" : ""}" data-e="${esc(x.e)}" title="${esc(x.z)} · ${esc(x.e)}">
+      `<button type="button" class="tag${on.has(x.e) ? " on" : ""}${/^成人[·向]/.test(x.c) ? " adult" : ""}" data-e="${esc(x.e)}" title="${esc(x.z)} · ${esc(x.e)}">
         ${esc(x.z)}<i>${esc(x.e)}</i>
       </button>`
     ).join("");
@@ -196,7 +197,8 @@
         if (L.some(l => l.c === catName && l.e === en)) return;
         const zh = String(x.zh || en).trim() || en;
         L.push({ c: catName, e: en, z: zh });
-        Z[en] = zh;
+        // 既有中文翻譯不得被學習流程覆寫：Z 以「首次建立者」為準
+        if (!Object.prototype.hasOwnProperty.call(Z, en)) Z[en] = zh;
       });
     }
   }
@@ -326,6 +328,21 @@
 
       ensureLearnedCategory();
       renderAll();
+
+      // 常用組合 chip 列（不只在空狀態）
+      const comboRow = $("comboRow");
+      if (comboRow) {
+        comboRow.innerHTML = COMBOS.map(c =>
+          `<button type="button" class="combo-chip" data-combo="${esc(c[0])}">${esc(c[0])}</button>`
+        ).join("");
+        comboRow.onclick = e => {
+          const b = e.target.closest("[data-combo]");
+          if (!b) return;
+          const name = b.dataset.combo;
+          Tags.applyCombo(name);
+          try { if (typeof window.__toast === "function") window.__toast(`已套用「${name}」`, "ok"); } catch (e) {}
+        };
+      }
     },
 
     /** 送進模型的提示詞（不含品質標籤，品質由 app.js 加） */
@@ -359,13 +376,22 @@
       if (!state.learned[source]) state.learned[source] = [];
       if (!Array.isArray(tags)) tags = [tags];
       const catName = "已學習·" + this._learnedLabel(source);
-      const existing = new Set(L.filter(x => x.c === catName).map(x => x.e));
       let changed = false;
       tags.forEach(raw => {
         const t = String(raw || '').trim();
-        if (!t || t.includes(',') || existing.has(t)) return;
-        state.learned[source].push({ en: t, zh: t });
-        existing.add(t);
+        if (!t || t.includes(',')) return;
+        // 已知中文名優先（Z 是中英對照表），不要用英文覆蓋掉既有翻譯
+        const zh = Z[t] || t;
+        const idx = state.learned[source].findIndex(x => x.en === t);
+        if (idx >= 0) {
+          // 已經學過：只補回正確的中文名，不重複新增
+          if (state.learned[source][idx].zh !== zh) {
+            state.learned[source][idx].zh = zh;
+            changed = true;
+          }
+          return;
+        }
+        state.learned[source].push({ en: t, zh });
         changed = true;
       });
       if (!changed) return;

@@ -1,0 +1,402 @@
+{
+  "adultAssetResponses": [
+    {
+      "url": "http://127.0.0.1:7860/assets/cat-adult.webp",
+      "status": 200,
+      "mime": "text/html"
+    }
+  ],
+  "catNamesAdultOn": [
+    {
+      "name": "常用",
+      "count": "16",
+      "badge": "",
+      "hasImg": true
+    },
+    {
+      "name": "人物",
+      "count": "22",
+      "badge": "",
+      "hasImg": true
+    },
+    {
+      "name": "頭髮",
+      "count": "38",
+      "badge": "",
+      "hasImg": true
+    },
+    {
+      "name": "臉&表情",
+      "count": "49",
+      "badge": "",
+      "hasImg": true
+    },
+    {
+      "name": "服裝",
+      "count": "41",
+      "badge": "",
+      "hasImg": true
+    },
+    {
+      "name": "配件",
+      "count": "35",
+      "badge": "",
+      "hasImg": true
+    },
+    {
+      "name": "動作",
+      "count": "38",
+      "badge": "",
+      "hasImg": true
+    },
+    {
+      "name": "構圖&光影",
+      "count": "28",
+      "badge": "",
+      "hasImg": true
+    },
+    {
+      "name": "場景",
+      "count": "44",
+      "badge": "",
+      "hasImg": true
+    },
+    {
+      "name": "風格",
+      "count": "34",
+      "badge": "",
+      "hasImg": true
+    },
+    {
+      "name": "成人向",
+      "count": "18",
+      "badge": "18",
+      "hasImg": false
+    },
+    {
+      "name": "成人·常用組合",
+      "count": "6",
+      "badge": "18",
+      "hasImg": false
+    },
+    {
+      "name": "成人·五官表情",
+      "count": "5",
+      "badge": "18",
+      "hasImg": false
+    },
+    {
+      "name": "成人·身體",
+      "count": "7",
+      "badge": "18",
+      "hasImg": false
+    },
+    {
+      "name": "成人·服裝內衣",
+      "count": "19",
+      "badge": "18",
+      "hasImg": false
+    },
+    {
+      "name": "成人·襪子腿飾",
+      "count": "2",
+      "badge": "18",
+      "hasImg": false
+    },
+    {
+      "name": "成人·動作",
+      "count": "12",
+      "badge": "18",
+      "hasImg": false
+    },
+    {
+      "name": "成人·R18",
+      "count": "173",
+      "badge": "18",
+      "hasImg": false
+    }
+  ],
+  "catNamesAdultOff": [
+    {
+      "name": "常用",
+      "count": "16"
+    },
+    {
+      "name": "人物",
+      "count": "22"
+    },
+    {
+      "name": "頭髮",
+      "count": "38"
+    },
+    {
+      "name": "臉&表情",
+      "count": "49"
+    },
+    {
+      "name": "服裝",
+      "count": "41"
+    },
+    {
+      "name": "配件",
+      "count": "35"
+    },
+    {
+      "name": "動作",
+      "count": "38"
+    },
+    {
+      "name": "構圖&光影",
+      "count": "28"
+    },
+    {
+      "name": "場景",
+      "count": "44"
+    },
+    {
+      "name": "風格",
+      "count": "34"
+    }
+  ],
+  "picked": [
+    "1girl",
+    "MISS:long hair",
+    "smile",
+    "classroom",
+    "MISS:sunlight"
+  ],
+  "D_progress": {
+    "innerWidth": 1920,
+    "innerHeight": 1080,
+    "doc": {
+      "scrollW": 1920,
+      "clientW": 1920,
+      "scrollH": 1080,
+      "clientH": 1080
+    },
+    "cats": {
+      "w": 478,
+      "h": 144,
+      "x": 25,
+      "y": 147,
+      "scrollH": 144,
+      "clientH": 144,
+      "maxHeight": "340px",
+      "scrollTop": 0,
+      "overflows": false
+    },
+    "tags": {
+      "w": 478,
+      "h": 367,
+      "x": 25,
+      "y": 291,
+      "scrollH": 367,
+      "clientH": 367,
+      "tagCount": 44,
+      "adultClassTags": 0
+    },
+    "libFoot": {
+      "w": 478,
+      "h": 315,
+      "x": 25,
+      "y": 658,
+      "scrollH": 314,
+      "clientH": 314,
+      "clipped": false
+    },
+    "library": {
+      "w": 480,
+      "h": 892,
+      "x": 24,
+      "y": 82
+    },
+    "stage": {
+      "w": 1016,
+      "h": 892,
+      "x": 522,
+      "y": 82
+    },
+    "settings": {
+      "w": 340,
+      "h": 892,
+      "x": 1556,
+      "y": 82
+    },
+    "actionbar": {
+      "w": 1920,
+      "h": 88,
+      "x": 0,
+      "y": 992
+    },
+    "genBtn": {
+      "w": 163,
+      "h": 50,
+      "x": 1733,
+      "y": 1012
+    },
+    "catNames": [
+      "常用",
+      "人物",
+      "頭髮",
+      "臉&表情",
+      "服裝",
+      "配件",
+      "動作",
+      "構圖&光影",
+      "場景",
+      "風格"
+    ],
+    "catCounts": [
+      "16",
+      "22",
+      "38",
+      "49",
+      "41",
+      "35",
+      "38",
+      "28",
+      "44",
+      "34"
+    ],
+    "selPills": 3,
+    "selLabels": [
+      "女孩",
+      "微笑",
+      "教室"
+    ],
+    "stageEmptyShown": false,
+    "stageProgShown": true,
+    "stageResultsShown": false,
+    "progPct": "8%",
+    "progStep": "第 2/25 步",
+    "resultImgs": [],
+    "historyShown": false
+  },
+  "D_result": {
+    "innerWidth": 1920,
+    "innerHeight": 1080,
+    "doc": {
+      "scrollW": 1920,
+      "clientW": 1920,
+      "scrollH": 1080,
+      "clientH": 1080
+    },
+    "cats": {
+      "w": 478,
+      "h": 180,
+      "x": 25,
+      "y": 147,
+      "scrollH": 180,
+      "clientH": 180,
+      "maxHeight": "340px",
+      "scrollTop": 0,
+      "overflows": false
+    },
+    "tags": {
+      "w": 478,
+      "h": 331,
+      "x": 25,
+      "y": 327,
+      "scrollH": 331,
+      "clientH": 331,
+      "tagCount": 44,
+      "adultClassTags": 0
+    },
+    "libFoot": {
+      "w": 478,
+      "h": 315,
+      "x": 25,
+      "y": 658,
+      "scrollH": 314,
+      "clientH": 314,
+      "clipped": false
+    },
+    "library": {
+      "w": 480,
+      "h": 892,
+      "x": 24,
+      "y": 82
+    },
+    "stage": {
+      "w": 1016,
+      "h": 892,
+      "x": 522,
+      "y": 82
+    },
+    "settings": {
+      "w": 340,
+      "h": 892,
+      "x": 1556,
+      "y": 82
+    },
+    "actionbar": {
+      "w": 1920,
+      "h": 88,
+      "x": 0,
+      "y": 992
+    },
+    "genBtn": {
+      "w": 134,
+      "h": 50,
+      "x": 1762,
+      "y": 1012
+    },
+    "catNames": [
+      "常用",
+      "人物",
+      "頭髮",
+      "臉&表情",
+      "服裝",
+      "配件",
+      "動作",
+      "構圖&光影",
+      "場景",
+      "風格",
+      ""
+    ],
+    "catCounts": [
+      "16",
+      "22",
+      "38",
+      "49",
+      "41",
+      "35",
+      "38",
+      "28",
+      "44",
+      "34",
+      "3"
+    ],
+    "selPills": 3,
+    "selLabels": [
+      "1girl",
+      "smile",
+      "classroom"
+    ],
+    "stageEmptyShown": false,
+    "stageProgShown": false,
+    "stageResultsShown": true,
+    "progPct": "100%",
+    "progStep": "第 25/25 步",
+    "resultImgs": [
+      {
+        "w": 1024,
+        "h": 1024,
+        "src": "http://127.0.0.1:7860/comfy/view?filename=ui_00063_.png&subfolder=&type=output"
+      }
+    ],
+    "historyShown": true
+  },
+  "genDone": true,
+  "lightbox": {
+    "shown": true,
+    "meta": "1024×1024 · 種子 1974659313 · ui_00063_.png",
+    "count": "1 / 1"
+  },
+  "consoleErrors": [],
+  "pageErrors": [],
+  "failedRequests": [],
+  "asset404": [
+    "http://127.0.0.1:7860/assets/cat-adult.webp"
+  ]
+}

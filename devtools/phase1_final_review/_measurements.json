@@ -1,0 +1,371 @@
+{
+  "A_adultOff": {
+    "innerWidth": 1920,
+    "innerHeight": 1080,
+    "doc": {
+      "scrollW": 1920,
+      "clientW": 1920,
+      "scrollH": 1080,
+      "clientH": 1080
+    },
+    "cats": {
+      "w": 478,
+      "h": 144,
+      "x": 25,
+      "y": 147,
+      "scrollH": 144,
+      "clientH": 144,
+      "maxHeight": "340px",
+      "scrollTop": 0,
+      "overflows": false
+    },
+    "tags": {
+      "w": 478,
+      "h": 389,
+      "x": 25,
+      "y": 291,
+      "scrollH": 389,
+      "clientH": 389,
+      "tagCount": 16,
+      "adultClassTags": 0
+    },
+    "libFoot": {
+      "w": 478,
+      "h": 293,
+      "x": 25,
+      "y": 680,
+      "scrollH": 292,
+      "clientH": 292,
+      "clipped": false
+    },
+    "library": {
+      "w": 480,
+      "h": 892,
+      "x": 24,
+      "y": 82
+    },
+    "stage": {
+      "w": 1016,
+      "h": 892,
+      "x": 522,
+      "y": 82
+    },
+    "settings": {
+      "w": 340,
+      "h": 892,
+      "x": 1556,
+      "y": 82
+    },
+    "actionbar": {
+      "w": 1920,
+      "h": 88,
+      "x": 0,
+      "y": 992
+    },
+    "genBtn": {
+      "w": 184,
+      "h": 50,
+      "x": 1713,
+      "y": 1012
+    },
+    "catNames": [
+      "常用",
+      "人物",
+      "頭髮",
+      "臉&表情",
+      "服裝",
+      "配件",
+      "動作",
+      "構圖&光影",
+      "場景",
+      "風格"
+    ],
+    "catCounts": [
+      "16",
+      "22",
+      "38",
+      "49",
+      "41",
+      "35",
+      "38",
+      "28",
+      "44",
+      "34"
+    ],
+    "selPills": 0,
+    "selLabels": [],
+    "stageEmptyShown": true,
+    "stageProgShown": false,
+    "stageResultsShown": false,
+    "progPct": "0%",
+    "progStep": "準備中",
+    "resultImgs": [],
+    "historyShown": false
+  },
+  "B_adultOn": {
+    "innerWidth": 1920,
+    "innerHeight": 1080,
+    "doc": {
+      "scrollW": 1920,
+      "clientW": 1920,
+      "scrollH": 1080,
+      "clientH": 1080
+    },
+    "cats": {
+      "w": 478,
+      "h": 283,
+      "x": 25,
+      "y": 147,
+      "scrollH": 283,
+      "clientH": 283,
+      "maxHeight": "340px",
+      "scrollTop": 0,
+      "overflows": false
+    },
+    "tags": {
+      "w": 478,
+      "h": 250,
+      "x": 25,
+      "y": 430,
+      "scrollH": 250,
+      "clientH": 250,
+      "tagCount": 18,
+      "adultClassTags": 18
+    },
+    "libFoot": {
+      "w": 478,
+      "h": 293,
+      "x": 25,
+      "y": 680,
+      "scrollH": 292,
+      "clientH": 292,
+      "clipped": false
+    },
+    "library": {
+      "w": 480,
+      "h": 892,
+      "x": 24,
+      "y": 82
+    },
+    "stage": {
+      "w": 1016,
+      "h": 892,
+      "x": 522,
+      "y": 82
+    },
+    "settings": {
+      "w": 340,
+      "h": 892,
+      "x": 1556,
+      "y": 82
+    },
+    "actionbar": {
+      "w": 1920,
+      "h": 88,
+      "x": 0,
+      "y": 992
+    },
+    "genBtn": {
+      "w": 184,
+      "h": 50,
+      "x": 1713,
+      "y": 1012
+    },
+    "catNames": [
+      "常用",
+      "人物",
+      "頭髮",
+      "臉&表情",
+      "服裝",
+      "配件",
+      "動作",
+      "構圖&光影",
+      "場景",
+      "風格",
+      "成人向",
+      "成人·常用組合",
+      "成人·五官表情",
+      "成人·身體",
+      "成人·服裝內衣",
+      "成人·襪子腿飾",
+      "成人·動作",
+      "成人·R18"
+    ],
+    "catCounts": [
+      "16",
+      "22",
+      "38",
+      "49",
+      "41",
+      "35",
+      "38",
+      "28",
+      "44",
+      "34",
+      "18",
+      "6",
+      "5",
+      "7",
+      "19",
+      "2",
+      "12",
+      "173"
+    ],
+    "selPills": 0,
+    "selLabels": [],
+    "stageEmptyShown": true,
+    "stageProgShown": false,
+    "stageResultsShown": false,
+    "progPct": "0%",
+    "progStep": "準備中",
+    "resultImgs": [],
+    "historyShown": false,
+    "warmBorderSample": {
+      "adultTagBorder": "rgba(200, 150, 100, 0.35)",
+      "normalTagBorder": null,
+      "adultTagCount": 18
+    }
+  },
+  "C_pickedGeneral": [
+    "1girl"
+  ],
+  "C_pickedAdult": [
+    "nsfw",
+    "nude",
+    "lingerie"
+  ],
+  "C_mixed": {
+    "innerWidth": 1920,
+    "innerHeight": 1080,
+    "doc": {
+      "scrollW": 1920,
+      "clientW": 1920,
+      "scrollH": 1080,
+      "clientH": 1080
+    },
+    "cats": {
+      "w": 478,
+      "h": 283,
+      "x": 25,
+      "y": 147,
+      "scrollH": 283,
+      "clientH": 283,
+      "maxHeight": "340px",
+      "scrollTop": 0,
+      "overflows": false
+    },
+    "tags": {
+      "w": 478,
+      "h": 228,
+      "x": 25,
+      "y": 430,
+      "scrollH": 228,
+      "clientH": 228,
+      "tagCount": 18,
+      "adultClassTags": 18
+    },
+    "libFoot": {
+      "w": 478,
+      "h": 315,
+      "x": 25,
+      "y": 658,
+      "scrollH": 314,
+      "clientH": 314,
+      "clipped": false
+    },
+    "library": {
+      "w": 480,
+      "h": 892,
+      "x": 24,
+      "y": 82
+    },
+    "stage": {
+      "w": 1016,
+      "h": 892,
+      "x": 522,
+      "y": 82
+    },
+    "settings": {
+      "w": 340,
+      "h": 892,
+      "x": 1556,
+      "y": 82
+    },
+    "actionbar": {
+      "w": 1920,
+      "h": 88,
+      "x": 0,
+      "y": 992
+    },
+    "genBtn": {
+      "w": 134,
+      "h": 50,
+      "x": 1762,
+      "y": 1012
+    },
+    "catNames": [
+      "常用",
+      "人物",
+      "頭髮",
+      "臉&表情",
+      "服裝",
+      "配件",
+      "動作",
+      "構圖&光影",
+      "場景",
+      "風格",
+      "成人向",
+      "成人·常用組合",
+      "成人·五官表情",
+      "成人·身體",
+      "成人·服裝內衣",
+      "成人·襪子腿飾",
+      "成人·動作",
+      "成人·R18"
+    ],
+    "catCounts": [
+      "16",
+      "22",
+      "38",
+      "49",
+      "41",
+      "35",
+      "38",
+      "28",
+      "44",
+      "34",
+      "18",
+      "6",
+      "5",
+      "7",
+      "19",
+      "2",
+      "12",
+      "173"
+    ],
+    "selPills": 4,
+    "selLabels": [
+      "女孩",
+      "nsfw",
+      "裸體",
+      "女用贴身内衣裤"
+    ],
+    "stageEmptyShown": true,
+    "stageProgShown": false,
+    "stageResultsShown": false,
+    "progPct": "0%",
+    "progStep": "準備中",
+    "resultImgs": [],
+    "historyShown": false
+  },
+  "consoleErrors": [],
+  "pageErrors": [],
+  "failedRequests": [],
+  "assetHtmlFallback": [
+    "http://127.0.0.1:7860/assets/cat-adult.webp",
+    "http://127.0.0.1:7860/assets/cat-adult.webp",
+    "http://127.0.0.1:7860/assets/cat-adult.webp",
+    "http://127.0.0.1:7860/assets/cat-adult.webp",
+    "http://127.0.0.1:7860/assets/cat-adult.webp"
+  ]
+}

@@ -1,0 +1,310 @@
+{
+  "results": [
+    {
+      "id": "T1",
+      "name": "一般標籤選取後底部顯示中文",
+      "pass": true,
+      "detail": {
+        "pills": [
+          "女孩",
+          "微笑",
+          "教室"
+        ],
+        "count": "3 個標籤"
+      }
+    },
+    {
+      "id": "T2",
+      "name": "生成完成後底部顯示名稱與生成前一致（且仍是中文）",
+      "pass": true,
+      "detail": {
+        "gen": {
+          "ok": true,
+          "sawProgress": true
+        },
+        "before": [
+          "女孩",
+          "微笑",
+          "教室"
+        ],
+        "after": [
+          "女孩",
+          "微笑",
+          "教室"
+        ],
+        "learnedPositive": [
+          {
+            "en": "1girl",
+            "zh": "女孩"
+          },
+          {
+            "en": "smile",
+            "zh": "微笑"
+          },
+          {
+            "en": "classroom",
+            "zh": "教室"
+          }
+        ]
+      }
+    },
+    {
+      "id": "T4",
+      "name": "新增已學習標籤（帶中文）後中文名稱正常",
+      "pass": true,
+      "detail": {
+        "hasLearned": true,
+        "cats": [
+          "常用",
+          "人物",
+          "頭髮",
+          "臉&表情",
+          "服裝",
+          "配件",
+          "動作",
+          "構圖&光影",
+          "場景",
+          "風格",
+          "更多分類 ▾1"
+        ],
+        "learnedTags": [
+          "我的客製標籤mycustomtag"
+        ],
+        "picked": [
+          "mycustomtag"
+        ],
+        "pills": [
+          "女孩",
+          "微笑",
+          "教室",
+          "我的客製標籤"
+        ]
+      }
+    },
+    {
+      "id": "T5",
+      "name": "已學習標籤可取消選取並再次選取",
+      "pass": true,
+      "detail": {
+        "before5": [
+          "女孩",
+          "微笑",
+          "教室",
+          "我的客製標籤"
+        ],
+        "afterDeselect": [
+          "女孩",
+          "微笑",
+          "教室"
+        ],
+        "afterReselect": [
+          "女孩",
+          "微笑",
+          "教室",
+          "我的客製標籤"
+        ]
+      }
+    },
+    {
+      "id": "T6a",
+      "name": "成人標籤可選取且底部顯示名稱穩定",
+      "pass": true,
+      "detail": {
+        "picked": [
+          "nsfw",
+          "nude",
+          "lingerie"
+        ],
+        "pills": [
+          "女孩",
+          "微笑",
+          "教室",
+          "我的客製標籤",
+          "nsfw",
+          "裸體",
+          "女用贴身内衣裤"
+        ],
+        "成人_裸體": true
+      }
+    },
+    {
+      "id": "T7",
+      "name": "中文搜尋與英文搜尋皆正常",
+      "pass": true,
+      "detail": {
+        "中文搜尋微笑": [
+          "微笑smile"
+        ],
+        "英文搜尋smile": [
+          "微笑smile",
+          "淺笑light smile"
+        ],
+        "中文搜尋女孩": [
+          "女孩1girl",
+          "兩個女孩2girls",
+          "多個女孩multiple girls"
+        ]
+      }
+    },
+    {
+      "id": "T8",
+      "name": "頁面重新載入後既有選取資料正常",
+      "pass": true,
+      "detail": {
+        "beforeReload": [
+          "女孩",
+          "微笑",
+          "教室",
+          "我的客製標籤",
+          "nsfw",
+          "裸體",
+          "女用贴身内衣裤"
+        ],
+        "afterReload": [
+          "女孩",
+          "微笑",
+          "教室",
+          "我的客製標籤",
+          "nsfw",
+          "裸體",
+          "女用贴身内衣裤"
+        ]
+      }
+    },
+    {
+      "id": "T9",
+      "name": "生成前後已選標籤顯示名稱完全一致（中英對照表未被覆寫）",
+      "pass": true,
+      "detail": {
+        "gen": {
+          "ok": true,
+          "sawProgress": true
+        },
+        "before": [
+          "女孩",
+          "微笑",
+          "教室",
+          "我的客製標籤",
+          "nsfw",
+          "裸體",
+          "女用贴身内衣裤"
+        ],
+        "after": [
+          "女孩",
+          "微笑",
+          "教室",
+          "我的客製標籤",
+          "nsfw",
+          "裸體",
+          "女用贴身内衣裤"
+        ],
+        "被改成英文": [],
+        "learnedPositive": [
+          {
+            "en": "1girl",
+            "zh": "女孩"
+          },
+          {
+            "en": "smile",
+            "zh": "微笑"
+          },
+          {
+            "en": "classroom",
+            "zh": "教室"
+          },
+          {
+            "en": "mycustomtag",
+            "zh": "我的客製標籤"
+          },
+          {
+            "en": "nsfw",
+            "zh": "nsfw"
+          },
+          {
+            "en": "nude",
+            "zh": "裸體"
+          },
+          {
+            "en": "lingerie",
+            "zh": "女用贴身内衣裤"
+          }
+        ],
+        "learnedGeneral": [
+          {
+            "en": "mycustomtag",
+            "zh": "我的客製標籤"
+          }
+        ]
+      }
+    },
+    {
+      "id": "T9b",
+      "name": "已學習·正向 分類可開啟且內容正常",
+      "pass": true,
+      "detail": {
+        "已學習正向標籤": [
+          "女孩1girl",
+          "微笑smile",
+          "教室classroom",
+          "我的客製標籤mycustomtag",
+          "nsfwnsfw",
+          "裸體nude",
+          "女用贴身内衣裤lingerie"
+        ]
+      }
+    },
+    {
+      "id": "T10",
+      "name": "冷啟動時舊的污染資料不會讓中文名變英文",
+      "pass": true,
+      "detail": {
+        "冷啟動後底部": [
+          "女孩",
+          "微笑",
+          "教室",
+          "我的客製標籤",
+          "nsfw",
+          "裸體",
+          "女用贴身内衣裤"
+        ],
+        "應為中文": [
+          "女孩",
+          "微笑",
+          "教室",
+          "我的客製標籤"
+        ],
+        "已學習原始": {
+          "general": [
+            {
+              "en": "mycustomtag",
+              "zh": "我的客製標籤"
+            }
+          ],
+          "positive": [
+            {
+              "en": "1girl",
+              "zh": "1girl"
+            },
+            {
+              "en": "smile",
+              "zh": "smile"
+            },
+            {
+              "en": "classroom",
+              "zh": "classroom"
+            }
+          ],
+          "negative": [
+            {
+              "en": "worst quality",
+              "zh": "worst quality"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "consoleErrors": [],
+  "pageErrors": [],
+  "failedRequests": []
+}
