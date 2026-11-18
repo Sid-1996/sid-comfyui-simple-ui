@@ -56,11 +56,6 @@ body {
   overflow: hidden;
 }
 
-/* 常用組合 chip 列 */
-.combo-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 4px 0; }
-.combo-row .combo-chip { padding: 4px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12px; color: var(--text-2); cursor: pointer; transition: border-color var(--dur), color var(--dur); }
-.combo-row .combo-chip:hover { border-color: var(--accent-line); color: var(--accent-2); }
-
 /* 背景：兩顆極淡光暈 + 4% 動漫紋理（紋理檔不存在時自動略過） */
 .bg-glow {
   position: fixed; inset: 0; z-index: 0; pointer-events: none;
@@ -204,7 +199,6 @@ h1, h2, h3, p { margin: 0; }
   color: #cfc7ff;
 }
 .btn-soft:hover { background: rgba(139, 124, 255, .2); border-color: var(--accent); }
-
 .btn-icon { width: 38px; padding: 0; }
 .btn-icon svg { width: 18px; height: 18px; }
 .btn-sm { height: 30px; padding: 0 10px; font-size: 12px; border-radius: 8px; }

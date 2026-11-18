@@ -1097,11 +1097,6 @@
       toast(`套用「${n}」`, "ok");
     };
     $("btnEmptyRandom").onclick = () => { $("btnRandom").click(); };
-    $("btnEmptyCombo").onclick = () => {
-      const n = window.Tags.applyCombo("校園少女");
-      toast(`套用「${n}」`, "ok");
-      syncGo();
-    };
     const openFolder = () => fetch("/open-output").catch(() => {});
     $("btnOpenFolder").onclick = openFolder;
     $("btnOpenFolder2").onclick = openFolder;
