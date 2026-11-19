@@ -740,6 +740,7 @@
   /* ── 圖片反推（WD14 EVA02）───────────────────────────────── */
   const RV = {
     file: null, dataUrl: "", running: false,
+    model: "eva02",   // "eva02"（預設，高品質）或 "vit"（快速）
     rating: null, general: [], character: [], timing: null,
     picked: new Set()
   };
@@ -851,7 +852,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          image: RV.dataUrl, threshold: 0.35, character_threshold: 0.85
+          image: RV.dataUrl, threshold: 0.35, character_threshold: 0.85,
+          model: RV.model
         })
       });
       const j = await r.json().catch(() => ({}));
@@ -1062,6 +1064,14 @@
     $("revClose2").onclick = closeReverse;
     $("revRun").onclick = rvRun;
     $("revApply").onclick = rvApply;
+    // 反推模型切換（EVA02 預設 / ViT 快速）
+    const revModelBtns = $("revModal").querySelectorAll(".rev-model-btn");
+    revModelBtns.forEach(b => {
+      b.onclick = () => {
+        RV.model = b.dataset.model;
+        revModelBtns.forEach(x => x.classList.toggle("on", x === b));
+      };
+    });
     $("revModal").onclick = e => { if (e.target.id === "revModal") closeReverse(); };
     $("revGeneral").onclick = rvToggleTag;
     $("revCharacter").onclick = rvToggleTag;

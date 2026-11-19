@@ -45,6 +45,9 @@ _start_lock = threading.Lock()
 # 一般使用不需要設定。
 WD14_PY = os.environ.get("WD14_PY", r"C:\ComfyUI\tools\wd14-venv\Scripts\python.exe")
 WD14_WORKER = os.environ.get("WD14_WORKER", r"C:\ComfyUI\tools\wd14_worker.py")
+# ViT v3：用已驗證的獨立 venv（含 onnx），CPU only
+WD14_VIT_PY = os.environ.get("WD14_VIT_PY", r"C:\ComfyUI\tools\wd14-vit-eval\venv\Scripts\python.exe")
+WD14_VIT_WORKER = os.environ.get("WD14_VIT_WORKER", r"C:\ComfyUI\tools\wd14_vit_worker.py")
 WD14_TMP = os.environ.get("WD14_TMP", r"C:\ComfyUI\tmp\wd14")  # 暫存圖片（不放進 simple_ui repo）
 WD14_MAX_UPLOAD = 12 * 1024 * 1024             # base64 字串上限
 WD14_MAX_BYTES = 8 * 1024 * 1024               # 原始位元組上限
@@ -204,7 +207,10 @@ def purge_wd14_tmp(ttl=WD14_TMP_TTL):
 class Wd14Worker:
     """管理 wd14_worker.py 子行程：單一推論佇列，崩潰會自行重啟。"""
 
-    def __init__(self):
+    def __init__(self, py=None, worker=None, label="EVA02"):
+        self.py = py or WD14_PY
+        self.worker = worker or WD14_WORKER
+        self.label = label
         self.proc = None
         self.pending = {}
         self.lock = threading.Lock()
@@ -217,27 +223,27 @@ class Wd14Worker:
         # 不會把新 Worker 的句柄關掉）
         self.errfiles = {}
 
-    @staticmethod
-    def _log(msg):
+    def _log(self, msg):
         try:
-            print("[wd14] " + msg, file=sys.stderr, flush=True)
+            print("[wd14:%s] %s" % (self.label, msg), file=sys.stderr, flush=True)
         except Exception:
             pass
 
     def _spawn(self):
-        if not os.path.isfile(WD14_PY):
-            raise RuntimeError("找不到 WD14 Python：" + WD14_PY)
-        if not os.path.isfile(WD14_WORKER):
-            raise RuntimeError("找不到 WD14 Worker：" + WD14_WORKER)
+        if not os.path.isfile(self.py):
+            raise RuntimeError("找不到 WD14 Python：" + self.py)
+        if not os.path.isfile(self.worker):
+            raise RuntimeError("找不到 WD14 Worker：" + self.worker)
         os.makedirs(LOG_DIR, exist_ok=True)
-        errfile = open(os.path.join(LOG_DIR, "wd14_worker.log"), "ab", buffering=0)
+        log_name = "wd14_worker.log" if self.label == "EVA02" else "wd14_vit_worker.log"
+        errfile = open(os.path.join(LOG_DIR, log_name), "ab", buffering=0)
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUNBUFFERED"] = "1"
         self.ready_info = None
         self.start_error = ""
         proc = subprocess.Popen(
-            [WD14_PY, WD14_WORKER],
+            [self.py, self.worker],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errfile,
             text=True, encoding="utf-8", bufsize=1,
             creationflags=0x08000000,   # CREATE_NO_WINDOW
@@ -408,7 +414,8 @@ class Wd14Worker:
                 pass
 
 
-WD14 = Wd14Worker()
+WD14 = Wd14Worker()                                              # 預設 EVA02
+WD14_VIT = Wd14Worker(py=WD14_VIT_PY, worker=WD14_VIT_WORKER, label="ViT")
 _rev_lock = threading.Lock()
 _rev_active = 0
 
@@ -668,6 +675,10 @@ class H(http.server.BaseHTTPRequestHandler):
         threshold = clamp(data.get("threshold"), 0.35)
         character_threshold = clamp(data.get("character_threshold"), 0.85)
 
+        # 選擇模型：EVA02（預設）或 ViT v3
+        model = str(data.get("model") or "eva02").strip().lower()
+        worker = WD14_VIT if model in ("vit", "vit_v3", "vit-v3", "wd-vit-tagger-v3") else WD14
+
         # 寫進專用暫存目錄（不放 simple_ui repo），用完立刻刪
         try:
             os.makedirs(WD14_TMP, exist_ok=True)
@@ -683,8 +694,8 @@ class H(http.server.BaseHTTPRequestHandler):
         result = None
         keep_file = True          # 保守起見：狀況不明就先保留，TTL 會收掉
         try:
-            ok, result, keep_file = WD14.submit(path, threshold, character_threshold,
-                                                 WD14_INFER_TIMEOUT)
+            ok, result, keep_file = worker.submit(path, threshold, character_threshold,
+                                                  WD14_INFER_TIMEOUT)
         finally:
             # keep_file=False 才代表「確定 Worker 已經用不到這張圖」：
             #   推論成功 / Worker 回錯誤 / Worker 根本沒起來 → 立即刪
