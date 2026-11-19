@@ -85,6 +85,13 @@
     } catch (e) { /* 無痕模式 */ }
   }
 
+  // 只保存學習標籤：learn()/clearLearned() 不得順手把本分頁（可能已過期）的 sel/adult/showEn 寫回
+  function saveLearned() {
+    try {
+      localStorage.setItem("ui.learnedTags", JSON.stringify(state.learned || { general: [], positive: [], negative: [] }));
+    } catch (e) { /* 無痕模式 */ }
+  }
+
   function notify() {
     window.dispatchEvent(new CustomEvent("tags:change"));
   }
@@ -169,6 +176,11 @@
   function commit() {
     save();
     renderAll(true);
+    try {
+      console.log("[tags] t=" + Date.now().toString(36) +
+                  " n=" + state.sel.length +
+                  " sel=" + state.sel.map(s => s.t).join("|"));
+    } catch (e) { /* ignore */ }
   }
 
   /* ── 隨機配對：分類 slot 產生器 ─────────────────────────── */
@@ -285,6 +297,61 @@
     }
   }
 
+  /* ── 跨分頁同步 ─────────────────────────────────────────
+     storage event 只會通知「其他」分頁；本分頁的按鈕/輸入仍即時更新 state。
+     此處只讀取 localStorage → 更新記憶體 state → 渲染 UI，不呼叫 save()，
+     避免把本分頁可能已過期的 state 寫回，也不會產生 storage 寫入迴圈。 */
+  function readStoredLearned() {
+    try {
+      const raw = JSON.parse(localStorage.getItem("ui.learnedTags") || "null");
+      if (Array.isArray(raw)) return { general: raw, positive: [], negative: [] };  // 舊格式相容
+      if (raw && typeof raw === "object") return {
+        general: Array.isArray(raw.general) ? raw.general : [],
+        positive: Array.isArray(raw.positive) ? raw.positive : [],
+        negative: Array.isArray(raw.negative) ? raw.negative : []
+      };
+    } catch (e) { /* 壞資料視為空 */ }
+    return { general: [], positive: [], negative: [] };
+  }
+
+  function syncFromStorage() {
+    let changed = false;
+    let storedSel = [];
+    try {
+      const v = JSON.parse(localStorage.getItem("sel") || "[]");
+      if (Array.isArray(v)) storedSel = v;
+    } catch (e) { /* 壞資料保留現有 state */ }
+    if (JSON.stringify(storedSel) !== JSON.stringify(state.sel)) {
+      state.sel = storedSel;
+      changed = true;
+    }
+    const adult = localStorage.getItem("adult") === "1";
+    if (state.adult !== adult) { state.adult = adult; changed = true; }
+    const showEn = localStorage.getItem("showEn") === "1";
+    if (state.showEn !== showEn) { state.showEn = showEn; changed = true; }
+    const learned = readStoredLearned();
+    if (JSON.stringify(learned) !== JSON.stringify(state.learned)) {
+      state.learned = learned;
+      changed = true;
+    }
+    if (!changed) return false;
+
+    if (!state.adult && isAdultCat(state.cat)) state.cat = "常用";
+    const btnEn = $("btnEn");
+    if (btnEn) {
+      btnEn.classList.toggle("on", state.showEn);
+      btnEn.setAttribute("aria-pressed", String(state.showEn));
+    }
+    if (els.tags) els.tags.classList.toggle("show-en", state.showEn);
+    const btnAdult = $("btnAdult");
+    if (btnAdult) {
+      btnAdult.className = "mini-toggle" + (state.adult ? " on" : "");
+      btnAdult.setAttribute("aria-pressed", String(state.adult));
+    }
+    ensureLearnedCategory();
+    renderAll(true);   // 只渲染並發 tags:change；不寫 localStorage
+    return true;
+  }
 
   const Tags = {
     init() {
@@ -420,6 +487,9 @@
       return tags.join(", ");
     },
 
+    /** 跨分頁 / 生成前同步：只讀 localStorage 更新狀態與 UI，不寫回 */
+    syncFromStorage,
+
     selected() { return state.sel; },
     snapshot() { return JSON.parse(JSON.stringify(state.sel)); },
 
@@ -466,6 +536,7 @@
     clear() {
       state.sel = [];
       if ($("pos")) $("pos").value = "";
+      try { localStorage.removeItem("ui.extra"); } catch (e) { /* 無痕模式：與 surpriseCombo 一致 */ }
       save();
       renderAll();
       window.dispatchEvent(new Event("pos:input"));
@@ -498,7 +569,7 @@
       });
       if (!changed) return;
       if (state.learned[source].length > 200) state.learned[source] = state.learned[source].slice(-200);
-      save();
+      saveLearned();   // 只寫 ui.learnedTags，不覆蓋其他分頁最新的 sel/adult/showEn
       ensureLearnedCategory();
       renderAll(true);
     },
@@ -514,7 +585,7 @@
         for (let i = L.length - 1; i >= 0; i--) if (L[i].c === catName) L.splice(i, 1);
         if (state.cat === catName) state.cat = "常用";
       });
-      save();
+      saveLearned();   // 同上：清空學習標籤也不動 sel/adult/showEn
       renderAll(true);
     },
 

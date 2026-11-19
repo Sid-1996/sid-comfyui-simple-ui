@@ -216,6 +216,69 @@
     return (q + base).replace(/^[,\s]+|[,\s]+$/g, "");
   }
 
+  // 生成前取「完整且一致」的快照：標籤狀態（深拷貝）+ 組裝好的提示詞 + 負面 + 設定
+  // payload 與 history 記錄都從這一份出來，不在流程中混用不同時間點的狀態
+  function snapshotNow() {
+    const sel = window.Tags.snapshot();
+    const posEl = $("pos") || {};
+    const negEl = $("neg") || {};
+    const extra = window.Dict.tr(posEl.value || "").trim();
+    const pos = ((S.settings.quality ? QUALITY : "") +
+      sel.map(s => s.w === 1 ? s.t : `(${s.t}:${s.w.toFixed(1)})`).concat(extra ? [extra] : []).join(", "))
+      .replace(/^[,\s]+|[,\s]+$/g, "");
+    return {
+      sel,
+      pos,
+      neg: negEl.value || "",
+      extraRaw: (posEl.value || "").trim(),
+      ckpt: $("ckpt") ? $("ckpt").value : "",
+      w: S.settings.size.split("x").map(Number)[0],
+      h: S.settings.size.split("x").map(Number)[1],
+      n: S.settings.n,
+      steps: Number($("steps").value) || 25,
+      cfg: Number($("cfg").value) || 6,
+      seed: Number($("seed").value)
+    };
+  }
+
+  // ── 生成診斷紀錄（request_id 對應前後端紀錄）────────────
+  let genSeq = 0;
+  function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h.toString(36); }
+  function logGen(event, obj) {
+    const rec = Object.assign({ t: Date.now(), event }, obj || {});
+    const arr = loadJSON("ui.genLog", []);
+    arr.push(rec);
+    if (arr.length > 50) arr.splice(0, arr.length - 50);
+    saveJSON("ui.genLog", arr);
+    console.log("[gen]", JSON.stringify(rec));
+  }
+
+  // ── 跨分頁狀態同步 ─────────────────────────────────────
+  // storage event 只通知「其他」分頁；本分頁的按鈕/輸入仍即時更新 state。
+  // 下列函式只讀取 localStorage → 更新記憶體/UI，不寫回，避免寫入迴圈與覆蓋他人選擇。
+  const SHARED_KEYS = new Set(["sel", "adult", "showEn", "ui.learnedTags", "ui.extra"]);
+
+  function syncExtraFromStorage() {
+    const el = $("pos");
+    if (!el) return;
+    // 編輯中保護：#pos 正在被使用者輸入時，不可被其他分頁的 ui.extra 靜默覆蓋，
+    // 否則會丟失尚未完成的輸入。失焦後的下一次同步（focus/手動）會再對齊。
+    if (document.activeElement === el) return;
+    let v = null;
+    try { v = localStorage.getItem("ui.extra"); } catch (e) { return; }
+    const next = v || "";   // key 被刪除時，與初始化規則一致：補充描述為空
+    if (el.value === next) return;
+    el.value = next;        // 程式化設定不觸發 input/change，因此不會寫回
+    updateWarn();
+    syncGo();
+  }
+
+  // storage event、window.focus、generate 前共用同一套同步邏輯
+  function syncSharedState() {
+    if (window.Tags && typeof window.Tags.syncFromStorage === "function") window.Tags.syncFromStorage();
+    syncExtraFromStorage();
+  }
+
   function wf(o) {
     return {
       "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: o.ckpt } },
@@ -234,6 +297,10 @@
   async function generate() {
     if (S.running || S.starting) return;
 
+    // 先同步最新持久化狀態（標籤）：若本分頁記憶體是過期的空值，下面會誤觸發「幫我配一組」並覆蓋其他分頁的選擇
+    // #pos 不在此同步：snapshotNow() 直接讀 DOM，避免生成前被其他分頁的 ui.extra 覆蓋正在編輯的內容
+    if (window.Tags && typeof window.Tags.syncFromStorage === "function") window.Tags.syncFromStorage();
+
     // 防呆：什麼都沒選就自動配一組，不讓使用者卡住
     if (!window.Tags.hasContent()) {
       const name = surpriseCombo();
@@ -247,7 +314,15 @@
     S.starting = false;
     if (!comfyOk) { syncGo(); return; }
 
-    const ckpt = $("ckpt").value;
+    // ① 生成前同步標籤狀態（#pos 由 snapshotNow 直接讀 DOM，不從 storage 覆蓋）
+    if (window.Tags && typeof window.Tags.syncFromStorage === "function") window.Tags.syncFromStorage();
+
+    // ② 取快照（標籤狀態、提示詞、負面、設定一次進）——之後請求與紀錄同源
+    const snap = snapshotNow();
+    const genId = "G" + (++genSeq) + "-" + Date.now().toString(36);
+    logGen("trigger", { genId, sel: snap.sel.map(s => s.t) });
+
+    const ckpt = snap.ckpt;
     if (!ckpt) {
       toast("模型還沒載入好，稍等幾秒再按一次", "warn");
       loadCkpts();
@@ -255,20 +330,21 @@
       return;
     }
 
-    const [w, h] = S.settings.size.split("x").map(Number);
-    let seed = Number($("seed").value);
+    const w = snap.w, h = snap.h;
+    let seed = snap.seed;
     if (!Number.isFinite(seed) || seed < 0) seed = Math.floor(Math.random() * 4294967295);
     S.seedUsed = seed;
 
     const o = {
-      ckpt, pos: composePrompt(), neg: $("neg").value,
-      w, h, n: S.settings.n, seed,
-      steps: Number($("steps").value) || 25,
-      cfg: Number($("cfg").value) || 6
+      ckpt, pos: snap.pos, neg: snap.neg,
+      w, h, n: snap.n, seed,
+      steps: snap.steps, cfg: snap.cfg
     };
-    const selSnap = window.Tags.snapshot();
-    const extraSnap = ($("pos").value || "").trim();
-    const negSnap = ($("neg").value || "").trim();
+    const selSnap = snap.sel;
+    const extraSnap = snap.extraRaw;
+    const negSnap = snap.neg.trim();
+
+    logGen("snapshot", { genId, posLen: snap.pos.length, negLen: snap.neg.length, posHash: hashStr(snap.pos), seed, steps: snap.steps, cfg: snap.cfg, tags: snap.sel.map(s => s.t) });
 
     S.running = true;
     S.cancelled = false;
@@ -285,12 +361,24 @@
     try {
       const res = await (await api("/prompt", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Request-Id": genId },
         body: JSON.stringify({ prompt: wf(o) })
       })).json();
 
-      S.promptId = res.prompt_id;
-      const hist = await waitFor(S.promptId);
+      const pid = res.prompt_id;
+      S.promptId = pid;
+      logGen("submit", { genId, promptId: pid || "", posHash: hashStr(o.pos) });
+
+      // 取消發生在「已送出、尚未登記 prompt_id」之間：把剛送出的 job 刪掉，不要讓它自己跑
+      if (S.cancelled) {
+        try {
+          await api("/queue", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ delete: [pid] }) });
+        } catch (e) { /* 可能已經開始執行 */ }
+        try { await api("/interrupt", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); } catch (e) { /* ignore */ }
+        return;
+      }
+
+      const hist = await waitFor(pid);
       if (!hist || S.cancelled) return;
 
       const status = hist.status || {};
@@ -305,6 +393,7 @@
 
       const outs = (hist.outputs && hist.outputs["7"] && hist.outputs["7"].images) || [];
       if (!outs.length) throw new Error("沒有拿到圖片，請再試一次");
+      logGen("result", { genId, promptId: pid || "", outs: outs.length, posHash: hashStr(o.pos) });
 
       const items = outs.map(f => ({
         url: "/comfy/view?filename=" + encodeURIComponent(f.filename) +
@@ -742,7 +831,9 @@
     file: null, dataUrl: "", running: false,
     model: "eva02",   // "eva02"（預設，高品質）或 "vit"（快速）
     rating: null, general: [], character: [], timing: null,
-    picked: new Set()
+    picked: new Set(),
+    // 分類瀏覽：cat="*" 表示目前模式下的全部；mode="all" 表示不過濾
+    cat: "*", mode: "all", catsReady: !!(window.TagCategories && window.TagCategories.of)
   };
 
   // 提示詞去重用的正規化：底線與空格視為同一個標籤
@@ -750,22 +841,175 @@
     return String(s || "").toLowerCase().trim().replace(/[_\s]+/g, " ");
   }
 
+  // 從 prompt 取出「完整標籤」：逗號／換行分隔，並拆解 (tag:1.2) 權重外框。
+  // 只用於比對，不重寫原始文字。
+  function rvPromptTokens(text) {
+    const out = new Set();
+    String(text == null ? "" : text).split(/[,\r\n]+/).forEach(seg => {
+      let t = String(seg).trim();
+      if (!t) return;
+      const m = t.match(/^\(\s*([^()]*?)\s*\)$/);
+      if (m) t = String(m[1]).split(":")[0].trim();
+      const k = normKey(t);
+      if (k) out.add(k);
+    });
+    return out;
+  }
+
+  /**
+   * 增量合併正向提示詞：只回傳新文字與統計，不碰 negative、不重寫原有內容。
+   * picked 內是 WD14 英文 tag（可能含底線）；寫入時轉成專案慣用的空格英文名稱。
+   * existing 是已在底部列的標籤，視為「已存在」以免重複。
+   */
+  function rvMergePrompt(promptText, picked, existing) {
+    const have = new Set((existing || []).map(x => normKey(x)));
+    rvPromptTokens(promptText).forEach(k => have.add(k));
+    const add = [];
+    let skipped = 0;
+    (picked || []).forEach(raw => {
+      if (typeof raw !== "string" && typeof raw !== "number") return;
+      const name = String(raw).replace(/_/g, " ").trim();
+      if (!name) return;
+      const k = normKey(name);
+      if (!k) return;
+      if (have.has(k)) { skipped++; return; }
+      have.add(k);
+      add.push(name);
+    });
+    const base = String(promptText == null ? "" : promptText);
+    const text = add.length
+      ? (base.trim() ? base + ", " + add.join(", ") : add.join(", "))
+      : base;
+    return { text: text, added: add.length, skipped: skipped };
+  }
+
+  /**
+   * 雙路徑分流：只處理明確選取的標籤，並跨「底部標籤列」與「#pos」整體去重。
+   * resolve(tag) 由 Tags.matchTag 提供：回傳 CATS 正名代表已知，回傳 null 代表未知。
+   * 注意：CATS 分類為 other 的標籤仍可能被 matchTag 找到，仍屬已知，走底部列。
+   */
+  function rvSplitPicked(picked, selected, posText, resolve) {
+    const have = new Set((selected || []).map(s =>
+      normKey(typeof s === "string" ? s : (s && s.t))));
+    rvPromptTokens(posText).forEach(k => have.add(k));
+    const toBottom = [], toExtra = [];
+    let skipped = 0;
+    (picked || []).forEach(raw => {
+      if (typeof raw !== "string" && typeof raw !== "number") return;
+      const name = String(raw).replace(/_/g, " ").trim();
+      if (!name) return;
+      const k = normKey(name);
+      if (!k) return;
+      if (have.has(k)) { skipped++; return; }
+      have.add(k);   // 同一批 picked 中重複的正規化標籤只處理一次
+      const lib = resolve ? resolve(name) : null;
+      if (lib) toBottom.push(lib);
+      else toExtra.push(name);
+    });
+    return { toBottom: toBottom, toExtra: toExtra, skipped: skipped };
+  }
+
   function rvResetResult() {
     RV.rating = null; RV.general = []; RV.character = []; RV.timing = null;
     RV.picked = new Set();
+    RV.cat = "*"; RV.mode = "all";
     $("revRating").hidden = true;
-    $("revGeneral").innerHTML = "";
-    $("revCharacter").innerHTML = "";
-    $("revGeneralCount").textContent = "";
-    $("revCharCount").textContent = "";
+    $("revTags").innerHTML = "";
+    $("revSelList").innerHTML = "";
+    $("revTagCount").textContent = "";
+    $("revSelCount").textContent = "已選 0 個";
     $("revFootMeta").textContent = "";
     rvUpdateApply();
   }
 
   function rvUpdateApply() {
     const n = RV.picked.size;
-    $("revApply").disabled = n === 0;
+    // 0 筆時仍可點擊，讓 rvApply 顯示白話提示，而不是毫無回應
+    $("revApply").disabled = false;
+    $("revApply").classList.toggle("dim", n === 0);
+    $("revApply").title = n === 0 ? "請先選取要加入的標籤" : "";
     $("revApply").textContent = "加入提示詞（" + n + "）";
+    $("revSelCount").textContent = "已選 " + n + " 個";
+  }
+
+  /* ── 分類瀏覽（分類依 TagCategories，成人標記依 Tags.isAdult）── */
+  const RV_MODE_CATS = {
+    all: null,
+    character: new Set(["character", "expression"]),
+    clothing: new Set(["clothing"]),
+    body: new Set(["body"]),
+    pose: new Set(["pose"]),
+    composition: new Set(["composition"])
+  };
+  const RV_CAT_ORDER = ["character", "clothing", "body", "pose", "expression",
+    "composition", "background", "style", "adult", "other"];
+
+  function rvCatOf(name) {
+    // 分類資料缺失時安全退回 other，不影響原有反推與加入提示詞流程
+    if (!RV.catsReady) return "other";
+    try { return window.TagCategories.of(name) || "other"; }
+    catch (e) { return "other"; }
+  }
+  function rvCatName(id) {
+    const c = RV.catsReady && window.TagCategories.categories;
+    return (c && c[id]) || id;
+  }
+  function rvItems() {
+    const out = [], seen = new Set();
+    (RV.general || []).concat(RV.character || []).forEach(t => {
+      const name = String((t && t.name) || "");
+      if (!name || seen.has(name)) return;
+      seen.add(name);
+      const lib = window.Tags.matchTag(name);
+      out.push({
+        name: name,
+        label: name.replace(/_/g, " "),
+        zh: lib ? window.Tags.tagZh(lib) : "",
+        score: (t && t.score) || 0,
+        cat: rvCatOf(name),
+        adult: window.Tags.isAdult(name)
+      });
+    });
+    return out;
+  }
+  function rvAllowed() { return RV_MODE_CATS[RV.mode] || null; }
+  function rvVisible() {
+    const allow = rvAllowed();
+    return rvItems().filter(it =>
+      (!allow || allow.has(it.cat)) && (RV.cat === "*" || it.cat === RV.cat));
+  }
+  function rvRenderCats() {
+    const allow = rvAllowed();
+    const all = rvItems();
+    const counts = {};
+    RV_CAT_ORDER.forEach(c => { counts[c] = all.filter(it => it.cat === c &&
+      (!allow || allow.has(c))).length; });
+    $("revCats").innerHTML = RV_CAT_ORDER.map(c => {
+      const on = RV.cat === c;
+      const dim = allow && !allow.has(c) ? " dim" : "";
+      return '<button type="button" class="rev-cat' + (on ? " on" : "") + dim +
+        '" data-cat="' + esc(c) + '" role="tab" aria-selected="' + on + '">' +
+        esc(rvCatName(c)) + '<b>' + counts[c] + '</b></button>';
+    }).join("");
+    $("revCatWarn").hidden = RV.catsReady;
+  }
+  function rvRenderModes() {
+    document.querySelectorAll("#revModes .rev-mode-btn").forEach(b => {
+      b.classList.toggle("on", b.dataset.mode === RV.mode);
+    });
+  }
+  function rvRenderPicked() {
+    const names = Array.from(RV.picked);
+    $("revSelCount").textContent = "已選 " + names.length + " 個";
+    if (!names.length) { $("revSelList").innerHTML = '<span class="rev-empty">還沒選標籤</span>'; return; }
+    const byName = {};
+    rvItems().forEach(it => { byName[it.name] = it; });
+    $("revSelList").innerHTML = names.map(n => {
+      const it = byName[n] || { label: String(n).replace(/_/g, " ") };
+      const text = it.zh ? (it.zh + " · " + it.label) : it.label;
+      return '<button type="button" class="rev-chip" data-drop="' + esc(n) +
+        '" title="點一下取消">' + esc(text) + '<span>✕</span></button>';
+    }).join("");
   }
 
   function rvError(msg) {
@@ -878,23 +1122,21 @@
     }
   }
 
-  function rvRenderGroup(id, list, kind) {
-    const el = $(id);
+  function rvRenderTags() {
+    const list = rvVisible();
+    const el = $("revTags");
+    $("revTagCount").textContent = list.length ? ("（" + list.length + "）") : "";
     if (!list.length) {
-      el.innerHTML = kind === "character"
-        ? "<div class=\"rev-empty\">這張圖沒有認出特定角色。</div>"
-        : "<div class=\"rev-empty\">沒有一般標籤。</div>";
+      el.innerHTML = '<div class="rev-empty">這個分類沒有標籤，換一個分類或模式看看。</div>';
       return;
     }
-    el.innerHTML = list.map(t => {
-      const label = String(t.name || "").replace(/_/g, " ");
-      const lib = window.Tags.matchTag(t.name);
-      const zh = lib ? window.Tags.tagZh(lib) : "";
-      const tip = zh ? (zh + " · " + t.name) : t.name;
-      const adult = window.Tags.isAdult(t.name);
-      return "<button type=\"button\" class=\"rev-tag" + (adult ? " adult" : "") + "\" " +
-        "data-kind=\"" + kind + "\" data-name=\"" + esc(t.name) + "\" title=\"" + esc(tip) + "\">" +
-        "<span>" + esc(label) + "</span><i>" + Math.round((t.score || 0) * 100) + "</i></button>";
+    el.innerHTML = list.map(it => {
+      const tip = it.zh ? (it.zh + " · " + it.name) : it.name;
+      const text = it.zh ? (it.zh + " · " + it.label) : it.label;
+      return '<button type="button" class="rev-tag' + (it.adult ? " adult" : "") +
+        (RV.picked.has(it.name) ? " on" : "") + '" data-name="' + esc(it.name) +
+        '" title="' + esc(tip) + '"><span>' + esc(text) + '</span><i>' +
+        Math.round(it.score * 100) + '</i></button>';
     }).join("");
   }
 
@@ -907,17 +1149,13 @@
     } else {
       $("revRating").hidden = true;
     }
-    $("revGeneralCount").textContent = RV.general.length ? ("（" + RV.general.length + "）") : "";
-    $("revCharCount").textContent = RV.character.length ? ("（" + RV.character.length + "）") : "";
-    rvRenderGroup("revGeneral", RV.general, "general");
-    rvRenderGroup("revCharacter", RV.character, "character");
-    // 預設全選，使用者再取消不要的
+    // 預設全選，使用者再取消不要的（原始結果保持不變）
     RV.picked = new Set();
-    RV.general.forEach(t => RV.picked.add(t.name));
-    RV.character.forEach(t => RV.picked.add(t.name));
-    document.querySelectorAll("#revModal .rev-tag").forEach(b => {
-      b.classList.toggle("on", RV.picked.has(b.dataset.name));
-    });
+    rvItems().forEach(it => RV.picked.add(it.name));
+    rvRenderCats();
+    rvRenderModes();
+    rvRenderTags();
+    rvRenderPicked();
     const t = RV.timing || {};
     const bits = [];
     if (t.inference_seconds) bits.push("推論 " + t.inference_seconds + "s");
@@ -933,52 +1171,77 @@
     if (RV.picked.has(name)) RV.picked.delete(name);
     else RV.picked.add(name);
     b.classList.toggle("on", RV.picked.has(name));
+    rvRenderPicked();
     rvUpdateApply();
   }
 
-  function rvSetAll(kind, on) {
-    const list = kind === "character" ? RV.character : RV.general;
-    const el = kind === "character" ? $("revCharacter") : $("revGeneral");
-    list.forEach(t => { if (on) RV.picked.add(t.name); else RV.picked.delete(t.name); });
-    el.querySelectorAll(".rev-tag").forEach(b => {
-      b.classList.toggle("on", RV.picked.has(b.dataset.name));
-    });
+  function rvDropChip(e) {
+    const b = e.target.closest(".rev-chip");
+    if (!b) return;
+    RV.picked.delete(b.dataset.drop);
+    rvRenderPicked();
+    rvRenderTags();
     rvUpdateApply();
+  }
+
+  function rvSetVisible(on) {
+    rvVisible().forEach(it => { if (on) RV.picked.add(it.name); else RV.picked.delete(it.name); });
+    rvRenderTags();
+    rvRenderPicked();
+    rvUpdateApply();
+  }
+
+  function rvPickCat(cat) {
+    const allow = rvAllowed();
+    if (allow && !allow.has(cat)) RV.mode = "all";
+    RV.cat = (RV.cat === cat) ? "*" : cat;
+    rvRenderCats();
+    rvRenderModes();
+    rvRenderTags();
+  }
+
+  function rvPickMode(mode) {
+    RV.mode = mode;
+    RV.cat = "*";   // 讓該模式的所有分類一次顯示（角色模式含 character + expression）
+    rvRenderCats();
+    rvRenderModes();
+    rvRenderTags();
   }
 
   function rvApply() {
-    if (!RV.picked.size) { toast("先勾選想加的標籤", "warn"); return; }
-    const have = new Set(window.Tags.selected().map(s => normKey(s.t)));
-    const posRaw = ($("pos").value || "");
-    const inPos = new Set(posRaw.split(",").map(s => normKey(s)).filter(Boolean));
-    const libTags = [];
-    const extraTags = [];
-    RV.picked.forEach(name => {
-      const lib = window.Tags.matchTag(name);
-      if (lib) {
-        // 標籤庫有的 → 進已選標籤（不覆蓋既有選取）
-        if (!have.has(normKey(lib)) && !inPos.has(normKey(lib))) libTags.push(lib);
-      } else {
-        // 標籤庫沒有的 → 進補充描述
-        const label = String(name).replace(/_/g, " ");
-        if (!inPos.has(normKey(label)) && !have.has(normKey(label))) extraTags.push(label);
-      }
-    });
-    const addedSel = window.Tags.addTags(libTags);
-    let addedExtra = 0;
-    if (extraTags.length) {
-      const base = posRaw.trim();
-      const merged = (base ? base + ", " : "") + extraTags.join(", ");
-      $("pos").value = merged;
-      try { localStorage.setItem("ui.extra", merged); } catch (e) { /* 無痕模式 */ }
-      addedExtra = extraTags.length;
-      updateWarn();
+    if (!RV.picked.size) { toast("請先勾選想加的標籤", "warn"); return; }
+    const posBefore = ($("pos").value || "");
+    let split;
+    try {
+      split = rvSplitPicked(Array.from(RV.picked), window.Tags.selected(), posBefore,
+        name => window.Tags.matchTag(name));
+    } catch (e) {
+      toast("加入失敗，原提示詞未變更", "warn");
+      return;
     }
-    syncGo();
+    // 路徑一：CATS 已知 → 底部標籤列（addTags 自帶去重並透過 tags:change 更新 UI）
+    const addedBottom = split.toBottom.length ? window.Tags.addTags(split.toBottom) : 0;
+    // 路徑二：CATS 未知 → 正向提示詞欄位（增量合併，保留原始格式）
+    let addedExtra = 0;
+    if (split.toExtra.length) {
+      const merged = rvMergePrompt(posBefore, split.toExtra, []);
+      if (merged.added) {
+        $("pos").value = merged.text;
+        try { localStorage.setItem("ui.extra", merged.text); } catch (e) { /* 無痕模式 */ }
+        addedExtra = merged.added;
+        updateWarn();
+      }
+    }
+    if (!addedBottom) syncGo();   // 底部路徑已由 tags:change 觸發，避免重複更新
+    // RV.picked 故意不清空：使用者可以再檢查、調整，或用「清空暫存」自行清除
     closeReverse();
-    const total = addedSel + addedExtra;
-    if (total) toast("已加入 " + total + " 個標籤", "ok");
-    else toast("這些標籤都已經有了，沒有重複加入", "warn");
+    const total = addedBottom + addedExtra;
+    if (total) {
+      toast("已加入 " + total + " 個標籤（底部 " + addedBottom + "、補充描述 " + addedExtra + "）" +
+        (split.skipped ? "，略過 " + split.skipped + " 個重複" : ""), "ok");
+    } else {
+      toast("選取的標籤都已存在", "warn");
+    }
   }
 
   function openReverse() {
@@ -1073,8 +1336,19 @@
       };
     });
     $("revModal").onclick = e => { if (e.target.id === "revModal") closeReverse(); };
-    $("revGeneral").onclick = rvToggleTag;
-    $("revCharacter").onclick = rvToggleTag;
+    $("revTags").onclick = rvToggleTag;
+    $("revSelList").onclick = rvDropChip;
+    $("revCats").onclick = e => {
+      const b = e.target.closest(".rev-cat");
+      if (b) rvPickCat(b.dataset.cat);
+    };
+    $("revModes").onclick = e => {
+      const b = e.target.closest(".rev-mode-btn");
+      if (b) rvPickMode(b.dataset.mode);
+    };
+    $("revSelAll").onclick = () => rvSetVisible(true);
+    $("revSelNone").onclick = () => rvSetVisible(false);
+    $("revClear").onclick = () => { RV.picked.clear(); rvRenderTags(); rvRenderPicked(); rvUpdateApply(); };
     $("revDrop").onclick = () => $("revFile").click();
     $("revDrop").onkeydown = e => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("revFile").click(); }
@@ -1092,12 +1366,6 @@
       rvPick(f);
       e.target.value = "";
     };
-    $("revModal").querySelectorAll("[data-all]").forEach(b => {
-      b.onclick = () => rvSetAll(b.dataset.all, true);
-    });
-    $("revModal").querySelectorAll("[data-none]").forEach(b => {
-      b.onclick = () => rvSetAll(b.dataset.none, false);
-    });
     // 圖片拖到視窗空白處時，不要讓瀏覽器直接開圖
     window.addEventListener("dragover", e => e.preventDefault());
     window.addEventListener("drop", e => e.preventDefault());
@@ -1196,6 +1464,8 @@
       const typing = tag === "input" || tag === "textarea" || tag === "select";
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); return; }
       if (e.key === "Escape") {
+        // 模態視窗在前：刪除確認框打開時，Esc 先關它（此時它會浮在燈箱上），燈箱才輪到關
+        if (!$("modal").hidden) return closeModal();
         if (!$("lightbox").hidden) return closeLightbox();
         if (!$("revModal").hidden) return closeReverse();
         if (!$("advModal").hidden) return $("advClose").click();
@@ -1226,6 +1496,9 @@
     }
 
     window.addEventListener("tags:change", () => { syncGo(); });
+    window.addEventListener("storage", (e) => {
+      if (e && e.key && SHARED_KEYS.has(e.key)) syncSharedState();
+    });
     updateWarn();
     syncGo();
 
@@ -1236,7 +1509,10 @@
     // 圖片被刪的同步：開頁一次，之後回到視窗 / 每 45 秒各一次
     $("lbImg").addEventListener("error", () => { if (!$("lightbox").hidden) syncGallery(); });
     syncGallery();
-    window.addEventListener("focus", () => { if (!S.running) syncGallery(); });
+    window.addEventListener("focus", () => {
+      if (!S.running) syncGallery();
+      syncSharedState();   // 與 storage event 共用同一套同步邏輯
+    });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && !S.running) syncGallery();
     });

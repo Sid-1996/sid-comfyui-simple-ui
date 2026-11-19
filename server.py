@@ -445,6 +445,8 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.command in ("POST", "PUT"):
             n = int(self.headers.get("Content-Length", 0) or 0)
             data = self.rfile.read(n) if n else None
+        if path == "/prompt" and self.command == "POST" and data:
+            self._log_gen_request(data)
         req = urllib.request.Request(
             COMFY + path, data=data, method=self.command,
             headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
@@ -457,6 +459,45 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send(e.code, e.read(), e.headers.get("Content-Type", "application/json"))
         except Exception as e:  # ComfyUI 沒開、連線中斷
             self._json(502, {"error": "ComfyUI not reachable: " + str(e)})
+
+    def _log_gen_request(self, body):
+        """生成請求診斷：把 /prompt 的實際提示詞 hash 與參數寫進 logs/gen_requests.jsonl。
+        客戶端的 X-Request-Id 對應 app.js 的 ui.genLog（同一次生成的可追溯 id）。"""
+        try:
+            j = json.loads(body or b"{}")
+            wf = j.get("prompt") or {}
+            pos = neg = ""
+            ks = wh = {}
+            if isinstance(wf, dict):
+                n2 = wf.get("2")
+                n3 = wf.get("3")
+                if isinstance(n2, dict) and n2.get("class_type") == "CLIPTextEncode":
+                    pos = str((n2.get("inputs") or {}).get("text") or "")
+                if isinstance(n3, dict) and n3.get("class_type") == "CLIPTextEncode":
+                    neg = str((n3.get("inputs") or {}).get("text") or "")
+                k5 = wf.get("5")
+                ks = ((k5.get("inputs") if isinstance(k5, dict) else None) or {})
+                k4 = wf.get("4")
+                wh = ((k4.get("inputs") if isinstance(k4, dict) else None) or {})
+            rec = {
+                "ts": time.time(),
+                "request_id": (self.headers.get("X-Request-Id") or "").strip(),
+                "pos_len": len(pos),
+                "neg_len": len(neg),
+                "pos_hash": hashlib.sha256(pos.encode("utf-8", "replace")).hexdigest()[:12],
+                "neg_hash": hashlib.sha256(neg.encode("utf-8", "replace")).hexdigest()[:12],
+                "seed": ks.get("seed"),
+                "steps": ks.get("steps"),
+                "cfg": ks.get("cfg"),
+                "w": wh.get("width"),
+                "h": wh.get("height"),
+                "client": self.client_address[0] if self.client_address else "",
+            }
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(os.path.join(LOG_DIR, "gen_requests.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # 診斷不得影響生成流程
 
     # ── GET ────────────────────────────────────────────────
     def do_GET(self):
