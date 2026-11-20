@@ -10,7 +10,7 @@
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   const QUALITY = "masterpiece, best quality, amazing quality, ";
-  const DEFAULT_NEG = "worst quality, low quality, bad anatomy, bad hands, extra fingers, missing fingers, watermark, text, signature, blurry, child, loli, shota";
+  const DEFAULT_NEG = "worst quality, low quality, bad anatomy, bad hands, extra fingers, missing fingers, deformed hands, mutated hands, fused fingers, watermark, text, signature, blurry, child, loli, shota";
 
   const DEFAULTS = {
     size: "1024x1024", n: 1, quality: true, neg: DEFAULT_NEG,
