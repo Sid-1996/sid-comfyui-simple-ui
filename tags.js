@@ -152,7 +152,9 @@
 
     items.forEach(x => {
       if (isAdultCat(x.c)) {
-        return add("adult", x, { title: "成人內容", icon: GROUP_ICONS.warn, order: 90, badge: "18+", adult: true });
+        // 選「成人向」是全部；選「成人·XX」時標題跟著子分類，讓切換看得見差異
+        const title = isAdultCat(state.cat) && state.cat !== "成人向" ? state.cat : "成人內容";
+        return add("adult", x, { title, icon: GROUP_ICONS.warn, order: 90, badge: "18+", adult: true });
       }
       if (state.q) {
         return add("search", x, { title: "搜尋結果", icon: GROUP_ICONS.tag, order: 0, hint: state.q });
@@ -181,8 +183,12 @@
       if (!state.adult && isAdultCat(x.c)) return false;
       // 搜尋：维持原本比對，命中才納入
       if (k) return x.e.toLowerCase().includes(k) || x.z.includes(state.q) || x.c.includes(state.q);
-      // 18+ 開啟：成人標籤一律顯示，由 groupItems 收進獨立的「成人內容」分組
-      if (isAdultCat(x.c)) return true;
+      // 18+ 開啟：成人標籤只在成人分類被選時顯示（「成人向」= 全部，子分類 = 各自那份）
+      // 普通分類不混入成人標籤，否則底下一整包 232 張會蓋過目前分類
+      if (isAdultCat(x.c)) {
+        if (state.cat === "成人向") return true;
+        return isAdultCat(state.cat) && x.c === state.cat;
+      }
       return x.c === state.cat;
     });
     const on = new Set(state.sel.map(s => s.t));
@@ -503,7 +509,9 @@
         state.adult = !state.adult;
         btnAdult.classList.toggle("on", state.adult);
         btnAdult.setAttribute("aria-pressed", String(state.adult));
-        if (!state.adult && state.cat === "成人向") state.cat = "常用";
+        // 任何成人分類都可能被選（成人向 / 成人·R18 …），關掉 18+ 時一律退回常用，
+        // 否則分類列沒有亮著的按鈕，畫面會卡在「找不到」空狀態
+        if (isAdultCat(state.cat)) state.cat = "常用";
         renderAll(true);
         save();
       };
