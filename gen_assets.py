@@ -31,15 +31,11 @@ BASE = (
 
 # name -> (prompt, seed)
 ITEMS = {
-    # ── 吉祥物：同一角色、四種表情 ────────────────────────────────
+    # ── 吉祥物：同一角色、兩種表情 ────────────────────────────────
     "mascot-idle": (BASE + ", upper body, looking at viewer, gentle smile, closed mouth, "
                     "hands together, standing, soft rim light", 424242),
-    "mascot-think": (BASE + ", upper body, hand on own chin, thinking, closed mouth, looking up, "
-                     "pencil in mouth, sparkles", 424243),
     "mascot-happy": (BASE + ", upper body, open mouth, big smile, sparkling eyes, waving, "
                      "confetti, sparkles, energetic", 424244),
-    "mascot-sorry": (BASE + ", upper body, sweatdrop, wry smile, closed eyes, head tilt, "
-                     "apologetic, hands up", 424245),
 
     # ── 舞台插畫 ────────────────────────────────────────────────
     "stage-empty": ("1girl, solo, cat ears, cat tail, purple hair, twintails, purple eyes, "

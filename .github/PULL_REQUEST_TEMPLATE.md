@@ -13,6 +13,7 @@
 
 - [ ] `node --check app.js` / `tags.js` / `dict.js`
 - [ ] `python -m py_compile server.py`
+- [ ] `python -m py_compile ui_panel.pyw`
 - [ ] 瀏覽器 Console 0 錯誤
 - [ ] 一屏不捲動（`document.documentElement.scrollHeight === innerHeight`）
 

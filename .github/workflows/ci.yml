@@ -23,4 +23,6 @@ jobs:
           node --check tags.js
           node --check dict.js
       - name: Python syntax check
-        run: python -m py_compile server.py
+        run: |
+          python -m py_compile server.py
+          python -m py_compile ui_panel.pyw

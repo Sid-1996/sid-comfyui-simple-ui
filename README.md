@@ -13,13 +13,14 @@
 - 生成進度、取消、歷史縮圖、燈箱、快捷鍵
 - 18+ 標籤預設隱藏，需手動開啟
 - 標籤使用會自動學習，下次更快
+- 一鍵 WD14 圖片反推：上傳圖片自動辨識標籤並加入選取（需另裝工具，見根目錄 AGENTS.md）
 
 ## 需求
 
 - Windows 10/11（腳本為 PowerShell；其他 OS 請自行調整）
 - [ComfyUI Windows portable](https://github.com/comfyanonymous/ComfyUI) 已安裝
 - 模型：`WAI-Nsfw-Illustrious-17.safetensors`（或其他 Illustrious 系列，需自行改 workflow）
-- Python 3.10+（ComfyUI 內建 embeded python 即可）
+- Python：ComfyUI 內建 embedded python 跑 `server.py`；桌面控制台需系統 Python 3.13（含 tkinter），embedded 沒有 tkinter
 
 ## 怎麼跑
 
@@ -36,6 +37,7 @@ node --check app.js
 node --check tags.js
 node --check dict.js
 python -m py_compile server.py
+python -m py_compile ui_panel.pyw
 ```
 
 瀏覽器：開 `http://127.0.0.1:7860/?v=N`（N 遞增以避快取），Console 0 錯誤、`document.documentElement.scrollHeight === innerHeight`。
@@ -53,7 +55,7 @@ python -m py_compile server.py
 
 ## 路徑說明
 
-`ui_control.ps1` 與 `server.py` 內含本機路徑（`C:\ComfyUI\...`、`D:\ComfyUI_output`），請依你的環境修改。這是個人使用導向的專案，未做跨平台/跨路徑抽象。
+`ui_panel.pyw`、`ui_control.ps1` 與 `server.py` 內含本機路徑（`C:\ComfyUI\...`、`D:\ComfyUI_output`），請依你的環境修改。這是個人使用導向的專案，未做跨平台/跨路徑抽象。
 
 ## 授權
 
