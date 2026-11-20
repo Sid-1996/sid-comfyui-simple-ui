@@ -31,6 +31,10 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5V6a2 2 0 0 1 2-2h2.5M15.5 4H18a2 2 0 0 1 2 2v2.5M20 15.5V18a2 2 0 0 1-2 2h-2.5M8.5 20H6a2 2 0 0 1-2-2v-2.5"/><circle cx="12" cy="12" r="3.1"/></svg>
       圖片反推
     </button>
+    <button id="btnOpenFolder" class="btn btn-ghost btn-sm" type="button" title="開啟圖片資料夾">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+      圖片資料夾
+    </button>
     <button id="btnHelp" class="btn btn-ghost btn-icon" type="button" aria-label="使用說明" title="使用說明 (?)">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .9-1 1.6v.3"/><circle cx="12" cy="17" r="1"/></svg>
     </button>
@@ -47,32 +51,65 @@
           <input id="search" type="search" placeholder="搜尋標籤，中文或英文都行" autocomplete="off" aria-label="搜尋標籤">
         </div>
         <button id="btnEn" class="mini-toggle" type="button" aria-pressed="false" title="標籤同時顯示英文">EN</button>
+        <button id="btnRandom" class="mini-toggle mini-icon" type="button" title="隨機配一組標籤" aria-label="隨機配一組標籤">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.2"/><circle cx="15.5" cy="15.5" r="1.2"/><circle cx="15.5" cy="8.5" r="1.2"/><circle cx="8.5" cy="15.5" r="1.2"/></svg>
+        </button>
       </div>
 
-      <div id="cats" class="cats" role="tablist" aria-label="標籤分類"></div>
+      <!-- 分類導航：單排橫向，空間不足可捲動 -->
+      <div class="cats-wrap">
+        <button id="catsPrev" class="cats-arrow" type="button" aria-label="前一類分類" tabindex="-1">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>
+        </button>
+        <div id="cats" class="cats" role="tablist" aria-label="標籤分類"></div>
+        <button id="catsNext" class="cats-arrow" type="button" aria-label="後一分類" tabindex="-1">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+        </button>
+      </div>
 
+      <!-- 標籤內容：依用途分組，獨立垂直捲動 -->
       <div id="tags" class="tags" role="group" aria-label="標籤"></div>
 
+      <!-- 提示詞與動作：固定，不隨標籤捲動 -->
       <div class="lib-foot">
-        <textarea id="pos" rows="1" placeholder="補充描述（選填）：可以直接打中文，例如「櫻花 夜晚」" aria-label="補充描述"></textarea>
-        <div id="warn" class="warn" role="status"></div>
-        <textarea id="neg" rows="1" placeholder="負面提示詞（選填）：不想出現的東西，例如 blurry, watermark" aria-label="負面提示詞"></textarea>
-        <div id="negWarn" class="warn" role="status"></div>
-        <div class="lib-foot-row" style="margin-top:6px">
-          <button id="btnNegClear" class="btn btn-ghost btn-sm" type="button">清除負面</button>
-          <button id="btnNegDefault" class="btn btn-ghost btn-sm" type="button">預設負面</button>
-          <button id="btnNegCopy" class="btn btn-ghost btn-sm" type="button">複製負面</button>
-        </div>
-        <div class="lib-foot-row">
-          <button id="btnRandom" class="btn btn-ghost btn-sm" type="button">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.2"/><circle cx="15.5" cy="15.5" r="1.2"/><circle cx="15.5" cy="8.5" r="1.2"/><circle cx="8.5" cy="15.5" r="1.2"/></svg>
-            隨機配一組
-          </button>
-          <button id="btnOpenFolder" class="btn btn-ghost btn-sm" type="button">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
-            圖片資料夾
-          </button>
-        </div>
+        <section class="prompt-block">
+          <div class="prompt-head">
+            <h3 class="prompt-title">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.6-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z"/><path d="m14.5 6.5 3 3"/></svg>
+              補充描述
+            </h3>
+            <span class="prompt-hint">標籤在最下方；這裡可補充中文描述</span>
+          </div>
+          <textarea id="pos" rows="2" placeholder="例如：高品質，細緻的美少女，動漫風格…" aria-label="補充描述"></textarea>
+          <div id="warn" class="warn" role="status"></div>
+        </section>
+
+        <details class="neg-details" id="negDetails">
+          <summary class="neg-summary">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>
+            <span>負面提示詞</span>
+            <span id="negSummary" class="neg-state">預設</span>
+            <svg class="neg-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </summary>
+          <div class="neg-body">
+            <textarea id="neg" rows="2" placeholder="不想出現的東西，例如 blurry, watermark…" aria-label="負面提示詞"></textarea>
+            <div id="negWarn" class="warn" role="status"></div>
+            <div class="lib-foot-row neg-actions">
+              <button id="btnNegClear" class="btn btn-ghost btn-sm" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+                清除負面
+              </button>
+              <button id="btnNegDefault" class="btn btn-ghost btn-sm" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.6 5.5 6 .8-4.4 4.2 1.1 6-5.3-2.9-5.3 2.9 1.1-6L3.4 9.3l6-.8L12 3Z"/></svg>
+                預設負面
+              </button>
+              <button id="btnNegCopy" class="btn btn-ghost btn-sm" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+                複製負面
+              </button>
+            </div>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -117,6 +154,9 @@
       <div class="set-head">
         <h2>輸出設定</h2>
         <span class="meta" id="setHint">1024 × 1024</span>
+        <button id="btnSettingsCollapse" class="set-collapse" type="button" aria-label="收合輸出設定" title="收合輸出設定">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+        </button>
       </div>
 
       <div class="set-body">
@@ -149,16 +189,37 @@
           <span class="switch-text">自動加品質標籤<small>masterpiece, best quality…</small></span>
         </label>
 
-        <button id="btnAdv" class="adv-open" type="button">
-          <span>進階設定</span>
-          <span class="adv-sum" id="advSummary">步數 25 · CFG 6 · 種子 -1</span>
-        </button>
+        <details class="adv-box" id="advBox">
+          <summary class="adv-open">
+            <span>進階設定</span>
+            <span class="adv-sum" id="advSummary">步數 25 · CFG 6 · 種子 隨機</span>
+          </summary>
+          <div class="adv-body">
+            <div class="grid2">
+              <div><label class="field-label" for="steps">步數</label><input id="steps" type="number" min="8" max="60" value="25"></div>
+              <div><label class="field-label" for="cfg">CFG</label><input id="cfg" type="number" min="1" max="12" step="0.5" value="6"></div>
+            </div>
+            <label class="field-label" for="seed">種子（-1 = 每次隨機）</label>
+            <div class="seed-row">
+              <input id="seed" type="number" value="-1" step="1" placeholder="-1 = 隨機">
+              <button id="btnDice" class="btn btn-ghost btn-icon" type="button" aria-label="換一個種子" title="換一個種子">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.2"/><circle cx="15.5" cy="15.5" r="1.2"/><circle cx="15.5" cy="8.5" r="1.2"/><circle cx="8.5" cy="15.5" r="1.2"/></svg>
+              </button>
+            </div>
+            <p class="meta" style="margin-top:10px">改這些通常是為了微調同一張圖，平常生成不用動。</p>
+          </div>
+        </details>
       </div>
 
       <div class="set-foot">
-        <span class="meta">圖片存到 D:\ComfyUI_output</span>
-        <button id="btnOpenFolder2" class="btn btn-ghost btn-sm" type="button">開啟</button>
+        <span class="meta" id="outPath">圖片存到輸出資料夾</span>
       </div>
+
+      <!-- 收合後的細軌：放在三段內容之外，才不會被 inert 一起關掉 -->
+      <button id="settingsRail" class="settings-rail" type="button" aria-label="展開輸出設定" title="展開輸出設定" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>
+        <span>輸出設定</span>
+      </button>
     </aside>
   </main>
 
@@ -168,6 +229,10 @@
       <span id="selCount" class="sel-count">還沒選標籤</span>
       <div id="selBar" class="sel-bar"></div>
     </div>
+    <button id="seedLock" class="seed-lock" type="button" hidden title="種子目前固定，每次會畫出同樣的構圖。點一下改回每次隨機">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      <span id="seedLockText">種子固定</span><span class="seed-lock-x">解除</span>
+    </button>
     <button id="btnPreview" class="btn btn-ghost" type="button">完整提示詞</button>
     <button id="btnClear" class="btn btn-ghost" type="button">清除</button>
     <button id="go" class="btn btn-primary" type="button">
@@ -180,7 +245,7 @@
 <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
 <!-- ── 大圖 ──────────────────────────────────────────── -->
-<div id="lightbox" class="lightbox" hidden>
+<div id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="大圖檢視" tabindex="-1" hidden>
   <div class="lb-top">
     <span id="lbCount" class="lb-count"></span>
     <span id="lbMeta" class="meta"></span>
@@ -197,37 +262,6 @@
   <button id="lbNext" class="lb-nav lb-next" type="button" aria-label="下一張">›</button>
 </div>
 
-<!-- ── 進階設定（彈出，避免右欄被擠爆） ──────────────── -->
-<div id="advModal" class="modal" hidden>
-  <div class="modal-card modal-card-sm" role="dialog" aria-modal="true" aria-labelledby="advTitle">
-    <div class="modal-head">
-      <h2 id="advTitle">進階設定</h2>
-      <button id="advClose" class="btn btn-ghost btn-icon" type="button" aria-label="關閉">✕</button>
-    </div>
-    <div class="modal-body">
-      <p class="meta">負面提示詞已移到左側設定欄，可隨時編輯。</p>
-
-      <div class="grid2">
-        <div><label class="field-label" for="steps">步數</label><input id="steps" type="number" min="8" max="60" value="25"></div>
-        <div><label class="field-label" for="cfg">CFG</label><input id="cfg" type="number" min="1" max="12" step="0.5" value="6"></div>
-      </div>
-
-      <label class="field-label" for="seed">種子（-1 = 每次隨機）</label>
-      <div class="seed-row">
-        <input id="seed" type="number" value="-1" step="1">
-        <button id="btnDice" class="btn btn-ghost btn-icon" type="button" aria-label="換一個種子" title="換一個種子">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.2"/><circle cx="15.5" cy="15.5" r="1.2"/><circle cx="15.5" cy="8.5" r="1.2"/><circle cx="8.5" cy="15.5" r="1.2"/></svg>
-        </button>
-      </div>
-
-      <p class="meta" style="margin-top:12px">改這些通常是為了一次次微調同一張圖。平常生成不用動。</p>
-      <div class="modal-foot">
-        <button id="advDone" class="btn btn-soft" type="button">完成</button>
-      </div>
-    </div>
-  </div>
-</div>
-
 <!-- ── 圖片反推（WD14 EVA02） ────────────────────────── -->
 <div id="revModal" class="modal" hidden>
   <div class="modal-card modal-card-lg" role="dialog" aria-modal="true" aria-labelledby="revTitle">
@@ -239,12 +273,12 @@
       <div class="rev-grid">
 
         <div class="rev-left">
-          <div id="revDrop" class="rev-drop" tabindex="0" role="button" aria-label="選擇或拖曳圖片">
+          <div id="revDrop" class="rev-drop" tabindex="0" role="button" aria-label="選擇、拖曳或貼上圖片">
             <img id="revPreview" class="rev-preview" alt="" hidden>
             <div id="revHint" class="rev-hint">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
-              <p>把圖片拖進來<br>或點這裡選一張</p>
-              <p class="meta">支援 PNG、JPG、WebP</p>
+              <p>把圖片拖進來、點這裡選一張<br>或直接 Ctrl+V 貼上</p>
+              <p class="meta">支援 PNG、JPG、WebP、GIF</p>
             </div>
           </div>
           <p id="revFileMeta" class="meta"></p>

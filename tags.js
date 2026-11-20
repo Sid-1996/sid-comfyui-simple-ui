@@ -66,6 +66,7 @@
 
   const els = {};
   let scrollSeed = 0;
+  let syncCatArrows = () => {};   // init() 後接上分類導航的左右鍵狀態
 
   // 標籤比對用的正規化：底線與空格互通、大小寫不拘、空白收斂
   // 有些分類用「a/b」表示兩個同義標籤，比對時拆開看
@@ -109,7 +110,7 @@
       const icon = ICONS[c]
         ? `<img src="/assets/cat-${ICONS[c]}.webp" alt="" onerror="this.replaceWith(window.Tags._initial('${esc(c)}'))">`
         : '';
-      const initial = ICONS[c] ? '' : `<span class="cat-initial">${esc((c === "成人向" || c.startsWith("成人·")) ? "18" : (c.startsWith("已學習·") ? "學" : c[0]))}</span>`;
+      const initial = ICONS[c] ? '' : `<span class="cat-initial">${esc((c === "成人向" || c.startsWith("成人·")) ? "成" : (c.startsWith("已學習·") ? "學" : c[0]))}</span>`;
       return `<button type="button" class="cat${on ? " on" : ""}" data-c="${esc(c)}" role="tab" aria-selected="${on}">
         ${icon}${initial}<span>${esc(c)}</span><b>${counts[c] || 0}</b></button>`;
     };
@@ -120,14 +121,68 @@
       if (expanded) html += `<div class="cats-more">${secondary.map(renderBtn).join("")}</div>`;
     }
     els.cats.innerHTML = html;
+    syncCatArrows();
+  }
+
+  /* ── 標籤分組（依既有分類 / TagCategories 資料推導，不硬編碼標籤）── */
+  const GROUP_ICONS = {
+    star:  '<svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.5l6.1-.9L12 3Z"/></svg>',
+    image: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m4 17 5-5 3 3 3-3 5 5"/></svg>',
+    cube:  '<svg viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg>',
+    warn:  '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>',
+    tag:   '<svg viewBox="0 0 24 24"><path d="M4 5h7l9 9-7 7-9-9V5Z"/><circle cx="8" cy="9" r="1"/></svg>',
+    bolt:  '<svg viewBox="0 0 24 24"><path d="M13 3 5 14h6l-1 7 8-11h-6l1-7Z"/></svg>'
+  };
+
+  function groupItems(items) {
+    const buckets = new Map();
+    const add = (key, x, meta) => {
+      let g = buckets.get(key);
+      if (!g) { g = Object.assign({ key, items: [], seen: new Set(), order: 50 }, meta); buckets.set(key, g); }
+      if (g.seen.has(x.e)) return;   // 同名標籤出現在多個成人分類時只顯示一次
+      g.seen.add(x.e);
+      g.items.push(x);
+    };
+    // 「常用」分類前五筆（沿用資料自帶順序）即核心品質標籤
+    let core = new Set();
+    const common = CATS.find(c => c[0] === "常用");
+    if (common) common[1].split("|").slice(0, 5).forEach(p => core.add(norm(p.split(":")[0])));
+    const hasTC = !!(window.TagCategories && window.TagCategories.of);
+    const kind = e => hasTC ? window.TagCategories.of(e) : "";
+
+    items.forEach(x => {
+      if (isAdultCat(x.c)) {
+        return add("adult", x, { title: "成人內容", icon: GROUP_ICONS.warn, order: 90, badge: "18+", adult: true });
+      }
+      if (state.q) {
+        return add("search", x, { title: "搜尋結果", icon: GROUP_ICONS.tag, order: 0, hint: state.q });
+      }
+      if (x.c === "常用") {
+        if (core.has(norm(x.e))) return add("fav", x, { title: "常用標籤", icon: GROUP_ICONS.star, order: 0, action: true });
+        if (kind(x.e) === "style") return add("quality", x, { title: "畫質與細節", icon: GROUP_ICONS.image, order: 1 });
+        if (["composition", "background", "character"].indexOf(kind(x.e)) >= 0)
+          return add("view", x, { title: "構圖與視角", icon: GROUP_ICONS.cube, order: 2 });
+        return add("fav", x, { title: "常用標籤", icon: GROUP_ICONS.star, order: 0, action: true });
+      }
+      const ci = CATS.findIndex(c => c[0] === x.c);
+      return add("cat:" + x.c, x, {
+        title: x.c, icon: GROUP_ICONS.tag,
+        order: /^已學習·/.test(x.c) ? 80 : (10 + (ci < 0 ? 99 : ci))
+      });
+    });
+    return Array.from(buckets.values()).sort((a, b) => a.order - b.order);
   }
 
   /* ── 標籤格 ─────────────────────────────────────────────── */
   function renderTags() {
     const k = state.q.toLowerCase();
     const items = L.filter(x => {
-      if (!state.adult && /^成人[·向]/.test(x.c)) return false;
+      // 18+ 關閉：成人標籤完全不出現（存取限制不變）
+      if (!state.adult && isAdultCat(x.c)) return false;
+      // 搜尋：维持原本比對，命中才納入
       if (k) return x.e.toLowerCase().includes(k) || x.z.includes(state.q) || x.c.includes(state.q);
+      // 18+ 開啟：成人標籤一律顯示，由 groupItems 收進獨立的「成人內容」分組
+      if (isAdultCat(x.c)) return true;
       return x.c === state.cat;
     });
     const on = new Set(state.sel.map(s => s.t));
@@ -137,10 +192,21 @@
       return;
     }
 
-    els.tags.innerHTML = items.map(x =>
-      `<button type="button" class="tag${on.has(x.e) ? " on" : ""}${/^成人[·向]/.test(x.c) ? " adult" : ""}" data-e="${esc(x.e)}" title="${esc(x.z)} · ${esc(x.e)}">
-        ${esc(x.z)}<i>${esc(x.e)}</i>
-      </button>`
+    els.tags.innerHTML = groupItems(items).map(g => `
+      <section class="tag-group${g.adult ? " adult" : ""}">
+        <div class="tag-group-head">
+          <span class="tag-group-icon">${g.icon}</span>
+          <h3 class="tag-group-title">${esc(g.title)}</h3>
+          ${g.badge ? `<span class="tag-group-badge">${g.badge}</span>` : ""}
+          ${g.hint ? `<span class="prompt-hint">「${esc(g.hint)}」</span>` : ""}
+          ${g.action ? `<button type="button" class="tag-group-action" data-grp-act="quick">${GROUP_ICONS.bolt}快速選擇</button>` : ""}
+        </div>
+        <div class="tag-group-items">${g.items.map(x =>
+          `<button type="button" class="tag${on.has(x.e) ? " on" : ""}${/^成人[·向]/.test(x.c) ? " adult" : ""}" data-e="${esc(x.e)}" aria-pressed="${on.has(x.e)}" title="${esc(x.z)} · ${esc(x.e)}">
+            ${esc(x.z)}<i>${esc(x.e)}</i>
+          </button>`
+        ).join("")}</div>
+      </section>`
     ).join("");
 
     els.tags.scrollTop = scrollSeed;
@@ -153,9 +219,9 @@
         `<div class="pill" draggable="true" data-i="${i}" title="${esc(s.t)}">
           <span class="pill-t">${esc(Z[s.t] || s.t)}</span>
           ${s.w !== 1 ? `<span class="pill-w">×${s.w.toFixed(1)}</span>` : ""}
-          <button type="button" data-a="m" aria-label="減弱">−</button>
-          <button type="button" data-a="p" aria-label="加強">＋</button>
-          <button type="button" data-a="d" aria-label="移除">×</button>
+          <button type="button" data-a="m" aria-label="減弱 ${esc(Z[s.t] || s.t)}">−</button>
+          <button type="button" data-a="p" aria-label="加強 ${esc(Z[s.t] || s.t)}">＋</button>
+          <button type="button" data-a="d" aria-label="移除 ${esc(Z[s.t] || s.t)}">×</button>
         </div>`
       ).join("")
       : `<span class="sel-empty">還沒選標籤 — 從左邊點一個開始</span>`;
@@ -165,11 +231,32 @@
       : "還沒選標籤";
   }
 
+  // 重繪會把所有按鈕換掉；記下目前焦點，重繪後放回同一顆，鍵盤操作才不會每按一次就掉焦點
+  function focusKey() {
+    const a = document.activeElement;
+    if (!a || a === document.body || !a.dataset) return null;
+    const q = v => (window.CSS && CSS.escape) ? CSS.escape(v) : String(v).replace(/"/g, '\\"');
+    if (els.tags && els.tags.contains(a) && a.dataset.e) return { root: els.tags, sel: '.tag[data-e="' + q(a.dataset.e) + '"]' };
+    if (els.cats && els.cats.contains(a) && a.dataset.c) return { root: els.cats, sel: '.cat[data-c="' + q(a.dataset.c) + '"]' };
+    if (els.selBar && els.selBar.contains(a) && a.dataset.a) {
+      const p = a.closest(".pill");
+      if (p) return { root: els.selBar, sel: '.pill[data-i="' + p.dataset.i + '"] button[data-a="' + a.dataset.a + '"]' };
+    }
+    return null;
+  }
+  function restoreFocus(k) {
+    if (!k) return;
+    const n = k.root.querySelector(k.sel);
+    if (n) { try { n.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
+  }
+
   function renderAll(keepScroll) {
+    const fk = focusKey();
     if (keepScroll && els.tags) scrollSeed = els.tags.scrollTop;
     renderCats();
     renderTags();
     renderSel();
+    restoreFocus(fk);
     notify();
   }
 
@@ -361,6 +448,34 @@
       els.selCount = $("selCount");
       els.search = $("search");
 
+      // 分類導航左右鍵：只捲動 #cats，不改任何分類狀態或資料
+      syncCatArrows = () => {
+        const prev = $("catsPrev"), next = $("catsNext");
+        if (!prev || !next || !els.cats) return;
+        prev.disabled = els.cats.scrollLeft <= 2;
+        next.disabled = els.cats.scrollLeft + els.cats.clientWidth >= els.cats.scrollWidth - 2;
+      };
+      const navCats = dir => {
+        if (!els.cats) return;
+        els.cats.scrollBy({ left: dir * Math.max(160, Math.round(els.cats.clientWidth * .8)), behavior: "instant" });
+      };
+      const prev = $("catsPrev"), next = $("catsNext");
+      if (prev) prev.onclick = () => navCats(-1);
+      if (next) next.onclick = () => navCats(1);
+      if (els.cats) els.cats.addEventListener("scroll", syncCatArrows, { passive: true });
+      // 滾輪（垂直或水平）直接捲動分類列；到兩端時不攔截，交還給頁面
+      const catsWrap = els.cats && els.cats.parentElement;
+      if (catsWrap) catsWrap.addEventListener("wheel", e => {
+        if (!els.cats) return;
+        const d = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+        const max = els.cats.scrollWidth - els.cats.clientWidth;
+        if (!d || max <= 1) return;
+        if ((d < 0 && els.cats.scrollLeft <= 0) || (d > 0 && els.cats.scrollLeft >= max)) return;
+        e.preventDefault();
+        els.cats.scrollLeft += d;
+      }, { passive: false });
+      window.addEventListener("resize", syncCatArrows);
+
       // 在搜尋框旁動態加 18+ 開關，避免 index.html 塞太多東西
       const top = document.querySelector(".lib-top");
       const btnAdult = document.createElement("button");
@@ -410,6 +525,12 @@
       };
 
       els.tags.onclick = e => {
+        // 分組標題的「快速選擇」沿用既有隨機配一組邏輯
+        const act = e.target.closest("[data-grp-act]");
+        if (act) {
+          if (act.dataset.grpAct === "quick") Tags.applyRandomCombo();
+          return;
+        }
         const b = e.target.closest(".tag");
         if (!b) return;
         const t = b.dataset.e;
@@ -650,7 +771,7 @@
     _initial(c) {
       const span = document.createElement("span");
       span.className = "cat-initial";
-      span.textContent = (c === "成人向" || String(c).startsWith("成人·")) ? "18"
+      span.textContent = (c === "成人向" || String(c).startsWith("成人·")) ? "成"
         : (String(c).startsWith("已學習·") ? "學" : c[0]);
       return span;
     }

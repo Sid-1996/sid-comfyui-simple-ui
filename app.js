@@ -69,6 +69,38 @@
     return "生成失敗：" + ((e && e.message) || "未知錯誤");
   }
 
+  /* ── 對話框管理：焦點、背景 inert、Esc 疊層 ─────────────── */
+  const dialogStack = [];   // { el, close, opener }，最後一個是最上層
+  let lastEscAt = 0;
+  function topDialog() { return dialogStack.length ? dialogStack[dialogStack.length - 1] : null; }
+  function refreshInert() {
+    dialogStack.forEach((d, i) => { d.el.inert = i !== dialogStack.length - 1; });
+    const app = document.querySelector(".app");
+    if (app) app.inert = dialogStack.length > 0;
+  }
+  function openDialog(el, close, focusEl) {
+    if (!el || dialogStack.some(d => d.el === el)) return;
+    dialogStack.push({ el, close, opener: document.activeElement });
+    el.hidden = false;
+    refreshInert();
+    const target = focusEl ||
+      el.querySelector("button:not([hidden]):not([disabled]), input:not([disabled]), select, textarea");
+    if (target) { try { target.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
+  }
+  function closeDialog(el) {
+    if (!el) return;
+    el.hidden = true;
+    const i = dialogStack.findIndex(d => d.el === el);
+    if (i < 0) return;
+    const d = dialogStack.splice(i, 1)[0];
+    el.inert = false;
+    refreshInert();
+    const op = d.opener;
+    if (op && op !== document.body && document.contains(op) && !op.closest("[hidden]") && !op.closest("[inert]")) {
+      try { op.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+    }
+  }
+
   /* ── ComfyUI 狀態 ──────────────────────────────────────── */
   async function checkComfy(silent) {
     if (!silent) setStatus("checking", "檢查 ComfyUI…");
@@ -195,7 +227,7 @@
     $("stageResults").hidden = which !== "results";
   }
 
-  /* ── 隨機配一組：標籤 + 補充描述 + 種子一起換 ─────────── */
+  /* ── 隨機配一組：標籤 + 補充描述一起換（不動種子，避免偷偷鎖死）── */
   function surpriseCombo() {
     const name = window.Tags.applyRandomCombo();
     const pos = $("pos");
@@ -203,7 +235,6 @@
       pos.value = "";
       try { localStorage.removeItem("ui.extra"); } catch (e) { /* 無痕模式 */ }
     }
-    $("seed").value = String(Math.floor(Math.random() * 4294967295));
     updateWarn();
     syncGo();
     return name;
@@ -237,7 +268,7 @@
       n: S.settings.n,
       steps: Number($("steps").value) || 25,
       cfg: Number($("cfg").value) || 6,
-      seed: Number($("seed").value)
+      seed: readSeed()
     };
   }
 
@@ -290,7 +321,7 @@
         seed: o.seed, steps: o.steps, cfg: o.cfg,
         sampler_name: "dpmpp_2m", scheduler: "karras", denoise: 1 } },
       "6": { class_type: "VAEDecode", inputs: { samples: ["5", 0], vae: ["1", 2] } },
-      "7": { class_type: "SaveImage", inputs: { images: ["6", 0], filename_prefix: "ui" } }
+      "7": { class_type: "SaveImage", inputs: { images: ["6", 0], filename_prefix: "ui_" + o.fileTag } }
     };
   }
 
@@ -320,7 +351,13 @@
     // ② 取快照（標籤狀態、提示詞、負面、設定一次進）——之後請求與紀錄同源
     const snap = snapshotNow();
     const genId = "G" + (++genSeq) + "-" + Date.now().toString(36);
-    logGen("trigger", { genId, sel: snap.sel.map(s => s.t) });
+    // 檔名專用 tag：ComfyUI 用「目前目錄最大編號 + 1」產生檔名，刪除最新版後
+    // 下一次生成會重用同名檔。每次生成給一個 UUID（只有 hex 與 -，Windows/ComfyUI 都安全），
+    // 讓舊圖即使被刪也不會與新圖身份碰撞；與 genId 分開，後者仍供診斷追蹤用。
+    let fileTag;
+    try { fileTag = crypto.randomUUID(); }
+    catch (e) { fileTag = Date.now().toString(36) + "-" + Math.floor(Math.random() * 4294967295).toString(36); }
+    logGen("trigger", { genId, fileTag, sel: snap.sel.map(s => s.t) });
 
     const ckpt = snap.ckpt;
     if (!ckpt) {
@@ -338,7 +375,8 @@
     const o = {
       ckpt, pos: snap.pos, neg: snap.neg,
       w, h, n: snap.n, seed,
-      steps: snap.steps, cfg: snap.cfg
+      steps: snap.steps, cfg: snap.cfg,
+      fileTag
     };
     const selSnap = snap.sel;
     const extraSnap = snap.extraRaw;
@@ -506,15 +544,17 @@
     $("history").hidden = !has;
     $("histBar").innerHTML = has
       ? S.gallery.map((it, i) =>
-        `<button type="button" class="thumb" data-i="${i}" title="${esc(it.filename)}">
-          <img src="${esc(it.url)}" alt="" loading="lazy">
-          <span class="thumb-del" data-del="${i}" title="刪除這張">×</span>
-        </button>`).join("")
+        `<div class="thumb-wrap">
+          <button type="button" class="thumb" data-i="${i}" title="${esc(it.filename)}" aria-label="檢視第 ${i + 1} 張">
+            <img src="${esc(it.url)}" alt="" loading="lazy">
+          </button>
+          <button type="button" class="thumb-del" data-del="${i}" title="刪除這張" aria-label="刪除第 ${i + 1} 張">×</button>
+        </div>`).join("")
       : "";
     if (!has) return;
     $("histBar").querySelectorAll("img").forEach(img => {
       img.addEventListener("error", () => {
-        const t = img.closest(".thumb");
+        const t = img.closest(".thumb-wrap");
         if (t) t.style.visibility = "hidden";
         syncGallery();
       }, { once: true });
@@ -590,7 +630,7 @@
   function openLightbox(list, index) {
     S.lbList = list;
     S.lbIndex = index;
-    $("lightbox").hidden = false;
+    openDialog($("lightbox"), closeLightbox, $("lightbox"));
     paintLightbox();
   }
 
@@ -613,7 +653,7 @@
   }
 
   function closeLightbox() {
-    $("lightbox").hidden = true;
+    closeDialog($("lightbox"));
     $("lbImg").src = "";
   }
 
@@ -710,10 +750,10 @@
   function openModal(title, html) {
     $("modalTitle").textContent = title;
     $("modalBody").innerHTML = html;
-    $("modal").hidden = false;
+    openDialog($("modal"), closeModal, $("modalBody").querySelector("button"));
   }
 
-  function closeModal() { $("modal").hidden = true; }
+  function closeModal() { closeDialog($("modal")); }
 
   function showPromptModal() {
     const p = composePrompt();
@@ -752,11 +792,11 @@
       <h3>想寫自己的描述</h3>
       <p>左下角「補充描述」可以直接打中文，例如「櫻花 夜晚 回頭」。翻不掉的中文會用橘色標出來，點一下會幫你搜尋對應標籤。</p>
       <h3>鍵盤</h3>
-      <p><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 生成　<kbd>Esc</kbd> 取消／關閉　<kbd>/</kbd> 搜尋標籤　<kbd>←</kbd><kbd>→</kbd> 換圖　<kbd>?</kbd> 這份說明</p>
+      <p><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 生成　<kbd>Esc</kbd> 關閉視窗（生成中連按兩次＝取消）　<kbd>/</kbd> 搜尋標籤　<kbd>←</kbd><kbd>→</kbd> 換圖　<kbd>?</kbd> 這份說明</p>
       <h3>常見問題</h3>
       <p><b>按生成沒反應？</b>看右上角狀態列：黃燈就是 ComfyUI 沒開，點一下會自動幫你啟動。</p>
       <p><b>顯卡記憶體不夠？</b>把尺寸改小、張數改 1，或把步數降到 20。</p>
-      <p><b>圖存到哪？</b>D:\\ComfyUI_output，右上「圖片資料夾」可以直接打開。</p>
+      <p><b>圖存到哪？</b>${esc(S.outDir || "輸出資料夾")}，右上「圖片資料夾」可以直接打開。</p>
       <div class="modal-foot"><button type="button" class="btn btn-soft" data-close>知道了</button></div>`);
   }
 
@@ -772,21 +812,49 @@
     $("seed").value = s.seed;
     $("setHint").textContent = s.size.replace("x", " × ");
     updateAdvSummary();
+    updateNegSummary();
   }
 
   function persistSettings() {
     S.settings.neg = $("neg").value;
     S.settings.steps = Number($("steps").value) || 25;
     S.settings.cfg = Number($("cfg").value) || 6;
-    S.settings.seed = Number($("seed").value);
+    S.settings.seed = readSeed();
     S.settings.ckpt = $("ckpt").value || S.settings.ckpt;
     saveJSON("ui.settings", S.settings);
     updateAdvSummary();
+    updateNegSummary();
+  }
+
+  // 種子：空白或非數字一律視為 -1（每次隨機），避免 Number("") 變成 0 而悄悄鎖死
+  function readSeed() {
+    const v = String($("seed").value == null ? "" : $("seed").value).trim();
+    if (v === "") return -1;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.trunc(n) : -1;
   }
 
   function updateAdvSummary() {
+    const sd = readSeed();
     $("advSummary").textContent =
-      `步數 ${$("steps").value || 25} · CFG ${$("cfg").value || 6} · 種子 ${$("seed").value || "-1"}`;
+      `步數 ${$("steps").value || 25} · CFG ${$("cfg").value || 6} · 種子 ${sd < 0 ? "隨機" : sd}`;
+    updateSeedLock();
+  }
+
+  // 種子固定時，在底列顯示提醒與一鍵解除
+  function updateSeedLock() {
+    const b = $("seedLock");
+    if (!b) return;
+    const sd = readSeed();
+    b.hidden = sd < 0;
+    if (sd >= 0) $("seedLockText").textContent = "種子固定 " + sd;
+  }
+
+  function updateNegSummary() {
+    const el = $("negSummary");
+    if (!el) return;
+    const v = ($("neg").value || "").trim();
+    el.textContent = !v ? "未設定" : (v === DEFAULT_NEG ? "預設" : "已自訂");
   }
 
   /* ── 按鈕狀態（單一主動作）─────────────────────────────── */
@@ -835,6 +903,9 @@
     // 分類瀏覽：cat="*" 表示目前模式下的全部；mode="all" 表示不過濾
     cat: "*", mode: "all", catsReady: !!(window.TagCategories && window.TagCategories.of)
   };
+  // 與後端 sniff_image() 一致：只收這四種，其餘 mime 不當成成功載入
+  const RV_MIME = /^image\/(png|jpe?g|webp|gif)$/i;
+  let rvLoadSeq = 0;
 
   // 提示詞去重用的正規化：底線與空格視為同一個標籤
   function normKey(s) {
@@ -1055,31 +1126,48 @@
 
   function rvPick(file) {
     if (!file) return;
+    if (RV.running) {
+      toast("正在分析中，請等分析完成再更換圖片", "warn");
+      return;
+    }
     $("revError").hidden = true;
-    if (!/^image\//.test(file.type || "")) {
-      rvError("這不是圖片，請選 PNG、JPG 或 WebP。");
+    if (!RV_MIME.test(file.type || "")) {
+      rvError("這不是圖片，請選 PNG、JPG、WebP 或 GIF。");
       return;
     }
     if (file.size > 20 * 1024 * 1024) {
       rvError("圖片太大了（上限 20 MB），請換小一點的。");
       return;
     }
+    const seq = ++rvLoadSeq;
+    const prevFile = RV.file, prevUrl = RV.dataUrl;
+    // 失敗（含被更新的貼上取代）時不要動到已經成功的圖片與狀態
+    const fail = msg => {
+      if (seq !== rvLoadSeq) return;
+      RV.file = prevFile;
+      RV.dataUrl = prevUrl;
+      $("revRun").disabled = !RV.dataUrl;
+      rvError(msg);
+    };
     RV.file = file;
     RV.dataUrl = "";
-    rvResetResult();
+    $("revRun").disabled = true;
     const reader = new FileReader();
-    reader.onerror = () => rvError("圖片讀取失敗，換一張試試。");
+    reader.onerror = () => fail("圖片讀取失敗，換一張試試。");
     reader.onload = () => {
+      if (seq !== rvLoadSeq) return;
       rvDownscale(reader.result).then(url => {
+        if (seq !== rvLoadSeq) return;
+        rvResetResult();
         RV.dataUrl = url;
         $("revPreview").src = url;
         $("revPreview").hidden = false;
         $("revHint").hidden = true;
-        $("revFileMeta").textContent = file.name + " · " +
+        $("revFileMeta").textContent = (file.name || "貼上的圖片") + " · " +
           Math.max(1, Math.round(file.size / 1024)) + " KB";
         $("revRun").disabled = false;
         $("revStatus").textContent = "準備好了，按「反推標籤」開始。";
-      }).catch(() => rvError("圖片讀取失敗，換一張試試。"));
+      }).catch(() => fail("圖片讀取失敗，換一張試試。"));
     };
     reader.readAsDataURL(file);
   }
@@ -1245,11 +1333,11 @@
   }
 
   function openReverse() {
-    $("revModal").hidden = false;
     $("revRun").disabled = !RV.dataUrl;
+    openDialog($("revModal"), closeReverse, $("revDrop"));   // 打開就能直接 Ctrl+V，不必先點反推區
   }
 
-  function closeReverse() { $("revModal").hidden = true; }
+  function closeReverse() { closeDialog($("revModal")); }
   /* ── 初始化 ────────────────────────────────────────────── */
   function init() {
     window.Tags.init();
@@ -1366,6 +1454,21 @@
       rvPick(f);
       e.target.value = "";
     };
+    // 只在反推區貼上：從 clipboard 取第一個 image/* 檔案，其餘（含文字）完全不碰
+    $("revDrop").addEventListener("paste", e => {
+      const items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      let file = null;
+      for (const it of Array.from(items)) {
+        if (it.kind === "file" && /^image\//i.test(it.type || "")) {
+          file = it.getAsFile();
+          if (file) break;
+        }
+      }
+      if (!file) return;
+      e.preventDefault();
+      rvPick(file);   // 格式/容量檢查、縮圖、預覽都交給既有流程
+    });
     // 圖片拖到視窗空白處時，不要讓瀏覽器直接開圖
     window.addEventListener("dragover", e => e.preventDefault());
     window.addEventListener("drop", e => e.preventDefault());
@@ -1377,7 +1480,27 @@
     $("btnEmptyRandom").onclick = () => { $("btnRandom").click(); };
     const openFolder = () => fetch("/open-output").catch(() => {});
     $("btnOpenFolder").onclick = openFolder;
-    $("btnOpenFolder2").onclick = openFolder;
+
+    // 輸出設定收合／展開：只改 class 與可及性，不碰任何設定值或 localStorage
+    const settingsPanel = document.querySelector(".settings");
+    const setCollapsed = on => {
+      const ws = document.querySelector(".workspace");
+      const rail = $("settingsRail");
+      if (!ws || !settingsPanel || !rail) return;
+      ws.classList.toggle("settings-collapsed", on);
+      settingsPanel.classList.toggle("collapsed", on);
+      settingsPanel.querySelectorAll(".set-head, .set-body, .set-foot").forEach(el => {
+        el.inert = on;
+        if (on) el.setAttribute("aria-hidden", "true");
+        else el.removeAttribute("aria-hidden");
+      });
+      rail.hidden = !on;
+    };
+    $("btnSettingsCollapse").onclick = () => setCollapsed(true);
+    $("settingsRail").onclick = () => setCollapsed(false);
+    window.addEventListener("resize", () => {
+      if (innerWidth <= 1100 && settingsPanel.classList.contains("collapsed")) setCollapsed(false);
+    });
 
     // 狀態列：點一下 = 檢查 / 啟動
     $("statusPill").onclick = async () => {
@@ -1425,7 +1548,6 @@
         el.scrollLeft += e.deltaY;
       }, { passive: false });
     }
-    enableWheelScroll($("selBar"));
     enableWheelScroll($("histBar"));
 
     // 大圖
@@ -1444,16 +1566,17 @@
       if (e.target.id === "modal" || e.target.closest("[data-close]")) closeModal();
     };
 
-    // 進階設定（彈出視窗）
-    const openAdv = () => {
-      $("advModal").hidden = false;
-      updateAdvSummary();
+    // 進階設定：行內收合，記住展開狀態
+    const advBox = $("advBox");
+    try { advBox.open = localStorage.getItem("ui.advOpen") === "1"; } catch (e) { /* ignore */ }
+    advBox.addEventListener("toggle", () => {
+      try { localStorage.setItem("ui.advOpen", advBox.open ? "1" : "0"); } catch (e) { /* ignore */ }
+    });
+    $("seedLock").onclick = () => {
+      $("seed").value = "-1";
+      persistSettings();
+      toast("種子已改回每次隨機", "ok");
     };
-    const closeAdv = () => { $("advModal").hidden = true; };
-    $("btnAdv").onclick = openAdv;
-    $("advClose").onclick = closeAdv;
-    $("advDone").onclick = closeAdv;
-    $("advModal").onclick = e => { if (e.target.id === "advModal") closeAdv(); };
     ["neg", "steps", "cfg", "seed"].forEach(id => {
       $(id).addEventListener("input", persistSettings);
     });
@@ -1462,22 +1585,25 @@
     document.addEventListener("keydown", e => {
       const tag = (e.target.tagName || "").toLowerCase();
       const typing = tag === "input" || tag === "textarea" || tag === "select";
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); return; }
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); if (!topDialog()) generate(); return; }
       if (e.key === "Escape") {
-        // 模態視窗在前：刪除確認框打開時，Esc 先關它（此時它會浮在燈箱上），燈箱才輪到關
-        if (!$("modal").hidden) return closeModal();
-        if (!$("lightbox").hidden) return closeLightbox();
-        if (!$("revModal").hidden) return closeReverse();
-        if (!$("advModal").hidden) return $("advClose").click();
-        if (!$("modal").hidden) return closeModal();
-        if (S.running) cancel();
+        const td = topDialog();
+        if (td) { td.close(); return; }   // 最上層的視窗先關（刪除確認會浮在燈箱上）
+        if (S.running) {
+          // 生成中誤按 Esc 很容易：連按兩次才真的取消
+          const now = Date.now();
+          if (now - lastEscAt < 1500) { lastEscAt = 0; cancel(); }
+          else { lastEscAt = now; toast("再按一次 Esc 取消生成", "warn", 1500); }
+        }
         return;
       }
-      if (!$("lightbox").hidden) {
+      const td = topDialog();
+      if (td && td.el === $("lightbox")) {
         if (e.key === "ArrowLeft") lbStep(-1);
         if (e.key === "ArrowRight") lbStep(1);
         return;
       }
+      if (td) return;
       if (typing) return;
       if (e.key === "/") { e.preventDefault(); $("search").focus(); }
       if (e.key === "?") showHelp();
@@ -1501,6 +1627,11 @@
     });
     updateWarn();
     syncGo();
+
+    // 輸出資料夾：由後端回報，不在前端寫死路徑
+    fetch("/api/status", { cache: "no-store" }).then(r => r.json()).then(j => {
+      if (j && j.output) { S.outDir = j.output; $("outPath").textContent = "圖片存到 " + j.output; }
+    }).catch(() => { /* 保持預設文字 */ });
 
     // ComfyUI 狀態：開場檢查 + 每 20 秒輕量更新
     checkComfy();
