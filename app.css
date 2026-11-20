@@ -1300,6 +1300,13 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 }
 @media (max-width: 1100px) {
   body { overflow: auto; }
+  /* 堆疊版要捲動，但狀態燈／啟動／說明不能跟著捲走（使用說明的指示才成立）。
+     用實色背景蓋住下方內容；原本的半透明 + blur 在捲動時會透出底下的面板。 */
+  .topbar {
+    position: sticky; top: 0; z-index: 30;
+    background: var(--surface);
+    backdrop-filter: none;
+  }
   .app { height: auto; min-height: 100vh; grid-template-rows: 60px auto 84px; }
   .workspace, .workspace.settings-collapsed { grid-template-columns: 1fr; padding: 12px; }
   .library { max-height: 62vh; }
