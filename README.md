@@ -23,9 +23,9 @@
 
 ## 怎麼跑
 
-1. 編輯 `start_simple_ui.ps1` 內的路徑（`$root`、輸出資料夾）。
-2. 雙擊 `start_simple_ui.ps1`：會依序啟動 ComfyUI(8188) → 介面(7860) → 開瀏覽器。
-3. 或開發時：`python server.py`（假設 ComfyUI 已在 8188）。
+1. 雙擊桌面 `生圖控制台.lnk`，在視窗按「開始生圖 / 關閉生圖 / 重新啟動 / 開啟介面」。
+2. 或開發時：`python server.py`（假設 ComfyUI 已在 8188）。
+3. 查狀態：`powershell -NoProfile -File ui_control.ps1 -Action status`。
 
 圖片輸出預設 `D:\ComfyUI_output`。
 
@@ -53,7 +53,7 @@ python -m py_compile server.py
 
 ## 路徑說明
 
-`start_simple_ui.ps1` 與 `server.py` 內含本機路徑（`C:\ComfyUI\...`、`D:\ComfyUI_output`），請依你的環境修改。這是個人使用導向的專案，未做跨平台/跨路徑抽象。
+`ui_control.ps1` 與 `server.py` 內含本機路徑（`C:\ComfyUI\...`、`D:\ComfyUI_output`），請依你的環境修改。這是個人使用導向的專案，未做跨平台/跨路徑抽象。
 
 ## 授權
 

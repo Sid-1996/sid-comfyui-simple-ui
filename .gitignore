@@ -28,5 +28,3 @@ devtools/phase1_final_review/*.png
 devtools/wd14_review/*.png
 # Phase 1 驗收 PDF（截圖 PDF），保留在磁碟
 devtools/phase1_ui_review.pdf
-# Phase 0.5 UI/UX 原型：已被正式版取代，保留在磁碟不進版控
-devtools/uiux_prototype/

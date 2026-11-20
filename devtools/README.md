@@ -45,6 +45,5 @@
 - `phase1_final_review/*.png` — 驗收截圖，由 `phase1_capture.mjs` 重新產生
 - `wd14_review/*.png` — 反推 Modal 截圖，由 `wd14_ui_test.mjs` 重新產生
 - `phase1_ui_review.pdf` — Phase 1 視覺驗收 PDF
-- `uiux_prototype/` — Phase 0.5 UI/UX 原型，已被正式版取代
 
 （規則寫在根目錄 `.gitignore`；要納入版控就把對應行刪掉。）
