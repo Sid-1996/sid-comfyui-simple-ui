@@ -36,31 +36,45 @@ def port_up(port):
 
 
 def call_control(action):
-    """呼叫 ui_control.ps1 -Action <action>，回傳 Message 字串。"""
+    """呼叫 ui_control.ps1 -Action <action>，回傳 (ok, 訊息)。
+
+    PowerShell 5.1 的 stdout 是 Big5，不能用 utf-8 解碼，
+    因此先取 bytes 再嘗試 big5 / utf-8，避免中文訊息變亂碼。
+    """
     cmd = [PS, "-NoProfile", "-ExecutionPolicy", "Bypass",
            "-File", CONTROL, "-Action", action]
     try:
         r = subprocess.run(
-            cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
+            cmd, capture_output=True,
             creationflags=CREATE_NO_WINDOW, timeout=300,
         )
-        out = (r.stdout or "").strip()
+        raw = (r.stdout or b"").strip()
+        text = ""
+        for enc in ("utf-8", "big5"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            text = raw.decode("utf-8", errors="replace")
         try:
-            data = json.loads(out)
-            return data.get("Message") or out
+            data = json.loads(text)
+            return bool(data.get("Ok")), (data.get("Message") or text)
         except (ValueError, TypeError):
-            return out or (r.stderr or "").strip() or "（沒有收到回應）"
+            return False, (text or (r.stderr or b"").decode("utf-8", errors="replace") or "（沒有收到回應）")
     except subprocess.TimeoutExpired:
-        return "操作逾時，請檢查 ComfyUI / server.py 是否卡住。"
+        return False, "操作逾時，請檢查 ComfyUI / server.py 是否卡住。"
     except Exception as e:
-        return f"操作失敗：{e}"
+        return False, f"操作失敗：{e}"
 
 
 class Console:
     def __init__(self, root):
         self.root = root
         self.buttons = []
+        self._busy = False
+        self._action_labels = {"start": "▶ 開始生圖", "stop": "■ 關閉生圖", "restart": "↻ 重新啟動"}
         root.title("生圖控制台")
         root.geometry("420x322")
         root.resizable(False, False)
@@ -92,6 +106,9 @@ class Console:
         self.btn_refresh = self._btn("重新整理狀態", 152, 154, self.refresh_status)
         self.buttons = [self.btn_start, self.btn_stop, self.btn_restart,
                         self.btn_open, self.btn_refresh]
+        # 只有這三顆會在動作期間鎖住；「開啟介面」「重新整理狀態」永遠可用。
+        self._action_buttons = [self.btn_start, self.btn_stop, self.btn_restart]
+        self._auto_open_pending = False   # start 完成/超時後自動開瀏覽器的旗標
 
         # ---------- 訊息區 ----------
         frame = tk.Frame(root, bg=BG)
@@ -147,21 +164,68 @@ class Console:
         self.root.after(5000, self._tick)
 
     def act(self, action):
-        for b in self.buttons:
+        """背景執行動作；只鎖動作按鈕，「開啟介面」永遠可用。全流程自動處理。"""
+        if self._busy:
+            return
+        self._busy = True
+        self._auto_open_pending = (action == "start")
+        for b in self._action_buttons:
             b.config(state="disabled")
-        label = {"start": "開始生圖", "stop": "關閉生圖", "restart": "重新啟動"}[action]
-        self._write(f"正在執行「{label}」…")
+        self._write(f"正在執行「{self._action_labels[action]}」…請稍候")
         threading.Thread(target=self._act_worker, args=(action,), daemon=True).start()
+        # 保險：20 秒內背景沒回報就自動解鎖，改為輪詢 port（後端卡住也不連累 UI）
+        self.root.after(20000, lambda: self._unlock_if_stuck(action))
+
+    def _unlock_if_stuck(self, action):
+        if not self._busy:
+            return  # 背景已正常回報
+        self._busy = False
+        for b in self._action_buttons:
+            b.config(state="normal")
+        self._write("啟動程序中，正在自動等待生圖介面準備完成…")
+        if self._auto_open_pending:
+            self._wait_and_open(0)
+
+    def _wait_and_open(self, tries):
+        """背景卡住時的後備：輪詢 7860，起來就自動開瀏覽器（最多 60 秒）。"""
+        if not self._auto_open_pending:
+            return
+        if port_up(7860):
+            self._auto_open_pending = False
+            import webbrowser
+            webbrowser.open("http://127.0.0.1:7860")
+            self._write("生圖介面已準備完成，已自動開啟瀏覽器。")
+            self.refresh_status()
+        elif tries < 60:
+            self.root.after(1000, lambda: self._wait_and_open(tries + 1))
+        else:
+            self._auto_open_pending = False
+            self._write("生圖介面啟動逾時，請查看 C:\\ComfyUI\\logs 或按「重新啟動」。")
 
     def _act_worker(self, action):
-        msg = call_control(action)
-        self.root.after(0, lambda: self._act_done(msg))
+        ok, msg = call_control(action)
+        self.root.after(0, lambda: self._act_done(action, ok, msg))
 
-    def _act_done(self, msg):
+    def _act_done(self, action, ok, msg):
+        if not self._busy:
+            return  # 已被保險計時器解除，避免重複處理
+        self._busy = False
+        for b in self._action_buttons:
+            b.config(state="normal")
         self._write(msg)
         self.refresh_status()
-        for b in self.buttons:
-            b.config(state="normal")
+
+        # start 成功 → 自動開瀏覽器；背景卡住沒回報 → 交給 _wait_and_open 輪詢
+        if action == "start":
+            if ok and port_up(7860):
+                self._auto_open_pending = False
+                import webbrowser
+                webbrowser.open("http://127.0.0.1:7860")
+                self._write(msg + "\n（已自動開啟生圖介面）")
+            elif not port_up(7860):
+                self._auto_open_pending = True
+                self._write(msg + "\n（仍在等待生圖介面，準備好會自動開啟）")
+                self._wait_and_open(0)
 
     def open_ui(self):
         import webbrowser
