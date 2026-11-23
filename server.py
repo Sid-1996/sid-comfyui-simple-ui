@@ -1249,11 +1249,20 @@ class H(http.server.BaseHTTPRequestHandler):
         if not rel:
             rel = "index.html"
         full = os.path.normpath(os.path.join(ROOT, rel))
-
-        if not full.startswith(ROOT):          # path traversal
+        # 用 realpath + commonpath 判斷真正的目錄邊界：
+        # startswith(ROOT) 會誤放行 C:\app\simple_ui_evil 這類同名前綴的外部目錄，
+        # 也擋不住指向 Repo 外部的 symlink。
+        root_real = os.path.realpath(ROOT)
+        full_real = os.path.realpath(full)
+        try:
+            inside = os.path.commonpath([root_real, full_real]) == root_real
+        except (ValueError, OSError):
+            inside = False
+        if not inside:
             return self._send(403, b"forbidden", "text/plain; charset=utf-8")
-        if os.path.isdir(full) or not os.path.isfile(full):
-            full = os.path.join(ROOT, "index.html")   # 前端路由一律回首頁
+        if os.path.isdir(full_real) or not os.path.isfile(full_real):
+            full_real = os.path.join(root_real, "index.html")   # 前端路由一律回首頁
+        full = full_real
 
         ext = os.path.splitext(full)[1].lower()
         if ext not in ALLOWED:

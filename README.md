@@ -22,7 +22,7 @@ Sid-simple-ui 是 ComfyUI 的**外部極簡生圖前端**。你把 ComfyUI 留�
 ## 系統需求
 
 - Windows 桌面環境（建議 Windows 10 / 11）
-- **Python 3.10 或更新版本**（建議；基本服務最低為 3.5，但你不需要去裝舊版）
+- **Python 3.10 或更新版本**
 - **ComfyUI 必須由你自己安裝、啟動與管理**。任何安裝方式都可以，不限 Windows portable 版
 - 基本服務（含 `server.py`）只用 Python 標準庫，**不需 `pip install` 任何第三方套件**
 - 前端不需要 Node.js、npm、Build System 或外部 CDN；直接開瀏覽器即可
