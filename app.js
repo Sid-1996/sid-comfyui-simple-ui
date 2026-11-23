@@ -188,6 +188,13 @@
         toast(j.error || "目前是外部連線模式，請自行啟動 ComfyUI", "warn", 6000);
         return false;
       }
+      // 沒有明確啟動設定時，後端不會猜開發者路徑；直接把白話原因顯示給使用者
+      if (j.code && j.error) {
+        S.comfyUp = false;
+        setStatus("down", "ComfyUI 未連線 · 請自行啟動");
+        toast(j.error, "warn", 6000);
+        return false;
+      }
     } catch (e) { /* 下面統一處理 */ }
     setStatus("down", "ComfyUI 開不起來 · 點我重試");
     toast("ComfyUI 啟動失敗，請看 logs/comfyui.err.log", "err", 6000);
@@ -1171,7 +1178,8 @@
     const status = e && e.status;
     // 後端 /api/reverse 的 WORKER_ERROR 包含「資源不存在」與「服務暫時失敗」：
     // 先用 code 判斷大類，再從 error 內容區分是否為找不到 Worker（server.py 找不到 WD14 Python/Worker）。
-    if (code === "WORKER_ERROR" && /找不到 WD14|未安裝|not found/i.test(m))
+    if (code === "WD14_NOT_CONFIGURED" ||
+        (code === "WORKER_ERROR" && /找不到 WD14|未安裝|not found/i.test(m)))
       return "WD14 反推功能尚未安裝或未完成設定，所以這張圖沒有分析了。基本生圖不受影響，可以繼續用；若要啟用反推，請先準備 WD14 的 Worker、模型與 Python 環境。";
     if (code === "WORKER_ERROR")
       return "反推服務暫時沒回應，按一下 F5 重新整理再試；基本生圖不受影響。";

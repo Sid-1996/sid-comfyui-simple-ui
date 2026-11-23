@@ -83,13 +83,18 @@ python server.py
 
 ## 環境變數
 
-一般使用者只會用到下面三項。**全部都要在啟動 `server.py` 前設定，重啟服務後才會生效。**
+一般使用者通常只會用到前三項。全部都要在啟動 `server.py` 前設定，重啟服務後才會生效。
 
 | 變數 | 預設值 | 用途 | 什麼時候需要設定 |
 |---|---|---|---|
 | `COMFY_URL` | `http://127.0.0.1:8188` | 告訴 Sid-simple-ui 你的 ComfyUI 在哪裡 | ComfyUI 不在預設 8188 Port 時 |
 | `COMFY_OUTPUT_DIR` | 未設定 | 刪圖與「開啟輸出資料夾」使用的目錄 | 只有你需要這兩個功能時 |
 | `SIMPLE_UI_PORT` | `7860` | 本頁面的 Port（不是 ComfyUI 的 Port） | 7860 被佔用時 |
+| `COMFY_LAUNCH_CMD` | 未設定 | 你自己啟動 ComfyUI 的完整指令（選用） | 想讓本介面代為啟動 ComfyUI 時 |
+| `SIMPLE_UI_LOG_DIR` | 見下方「資料與日誌位置」 | 診斷日誌目錄（選用） | 想改日誌存放位置時 |
+| `WD14_PY` / `WD14_WORKER` | 未設定 | EVA02 反推的 Python 與 Worker 路徑 | 自行架設 WD14 時 |
+| `WD14_VIT_PY` / `WD14_VIT_WORKER` | 未設定 | ViT v3 反推的 Python 與 Worker 路徑 | 自行架設 WD14 ViT 時 |
+| `WD14_TMP` | 見下方「資料與日誌位置」 | 反推暫存圖目錄（選用） | 想改暫存位置時 |
 
 ### `COMFY_URL`
 
@@ -99,6 +104,21 @@ python server.py
 - 範例：`http://127.0.0.1:8189`、`http://localhost:8189`。
 - 設定後，介面不會再嘗試代你啟動 ComfyUI，請自行啟動它。
 - 設定格式錯誤時，`server.py` 會直接終止並印出中文說明。
+
+### `COMFY_LAUNCH_CMD`（選用，預設不啟動任何程式）
+
+- **預設沒有啟動指令**：就算沒設定 `COMFY_URL`，本介面也**不會**猜測 ComfyUI 安裝位置，不會啟動任何程式。請自行啟動你的 ComfyUI。
+- 只有當你明確設定 `COMFY_LAUNCH_CMD` 時，點「開始生圖」才會執行你指定的指令；執行的程式與參數完全來自該設定。
+- 指令寫成一個字串，含空白的路徑請用引號包住。
+
+  **PowerShell**
+  ```powershell
+  $env:COMFY_LAUNCH_CMD = '"D:\MyTools\python.exe" "D:\ComfyUI\main.py"'
+  python server.py
+  ```
+
+- 若同時設定 `COMFY_OUTPUT_DIR`，且指令中沒有 `--output-directory`，啟動時會自動附加該參數。
+- 若指令格式錯誤或程式啟動失敗，介面會顯示明確原因，不會默默改用其他路徑。
 
 ### `COMFY_OUTPUT_DIR`
 
@@ -150,9 +170,17 @@ python server.py
 
 - 基本生圖**完全不依賴 WD14**；沒有 WD14 時，本頁面所有基本功能都正常使用。
 - 公開 Repo 目前**不包含完整的 WD14 Worker、模型與專用 Python 環境**。Clone 之後不能假設反推功能已經可用。
-- 開發者本機 `C:\ComfyUI\tools` 底下的內容不屬於本 Repo，也不會隨 Clone 一起取得。
-- 目前尚無公開的 WD14 安裝指引；若缺少必要資源，按「反推標籤」時會明確提示「尚未安裝或未完成設定」，不會影響生圖。
-- 一般使用者不需要設定任何 `WD14_*` 環境變數。
+- 沒有設定 `WD14_PY` / `WD14_WORKER`（EVA02）或 `WD14_VIT_PY` / `WD14_VIT_WORKER`（ViT）時，反推功能**不會啟動任何 Worker**，也不會尋找別處的資源；按「反推標籤」會回「尚未安裝或未完成設定」。
+- 兩套模型各自獨立：只設定其中一套，另一套仍會顯示未設定，不會互相誤用。
+- 目前尚無公開的 WD14 安裝指引；一般使用者不需要設定任何 `WD14_*` 環境變數，直接忽略此功能即可。
+- `WD14_TMP` 未設定時，暫存圖放在本機使用者資料目錄下（見下節），不會放在 Repo、ComfyUI 輸出目錄或開發者路徑。背景清理只會刪除本程式產生且過期的暫存檔。
+
+## 資料與日誌位置
+
+- 診斷日誌預設存放在 `%LOCALAPPDATA%\SidSimpleUI\logs`（若沒有 `LOCALAPPDATA`，改用系統暫存目錄下的 `SidSimpleUI`）。
+- 反推暫存圖預設存放在 `%LOCALAPPDATA%\SidSimpleUI\wd14-tmp`。
+- 可用 `SIMPLE_UI_LOG_DIR` / `WD14_TMP` 改成自訂的**絕對路徑**；設定無效時，WD14 會回明確錯誤，日誌會退回預設位置，兩者都不會改用開發者路徑或阻止基本服務啟動。
+- 本程式不讀取、不寫入、不清理其他位置的日誌或暫存資料。
 
 ## 桌面控制台
 
@@ -191,6 +219,7 @@ Repo 內的 `ui_control.ps1`、`ui_panel.pyw`、`ui_panel.ps1` 是**開發者本
 | 執行 `python` 顯示找不到指令 | Python 未安裝或未加入 PATH；可改用 `py server.py`，或重新安裝 Python 並勾選加入 PATH。 |
 | Port 已被佔用 | 7860 被其他程式使用；改設 `SIMPLE_UI_PORT` 並開啟對應網址。 |
 | 頁面顯示 ComfyUI 沒連線 | ComfyUI 沒啟動，或 `COMFY_URL` 指向錯誤 Port；先啟動 ComfyUI，或確認 `COMFY_URL`。 |
+| 點「開始生圖」顯示尚未設定啟動指令 | 這是正常的：本介面不會猜你的 ComfyUI 安裝位置。請先自行啟動 ComfyUI；若要代啟動，請設定 `COMFY_LAUNCH_CMD`。 |
 | 啟動時出現 `COMFY_URL 設定錯誤` | 檢查是否寫成 LAN IP、少了 Port、或含額外路徑；格式請見上方範例。 |
 | 可以按生成，但不能刪圖 / 開資料夾 | 尚未設定有效的 `COMFY_OUTPUT_DIR`，請設定後重啟服務。 |
 | 反推標籤顯示尚未安裝 | 公開 Repo 不含 WD14 資源；基本生圖不受影響，可忽略此功能。 |

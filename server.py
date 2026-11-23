@@ -14,11 +14,14 @@ import http.server
 import json
 import mimetypes
 import os
+import re
 import select
+import shlex
 import socket
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -70,9 +73,63 @@ except ValueError as exc:
         "http://127.0.0.1:8188", "127.0.0.1", 8188, "http", False)
     _COMFY_ERROR = str(exc)
 
-COMFY_ROOT = r"C:\ComfyUI\ComfyUI_windows_portable"
-COMFY_PY = os.path.join(COMFY_ROOT, "python_embeded", "python.exe")
-LOG_DIR = r"C:\ComfyUI\logs"
+APP_NAME = "SidSimpleUI"
+
+
+def _user_data_dir():
+    """Sid-simple-ui 專用的使用者資料根目錄；絕對不指向開發者路徑。"""
+    base = (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or
+            tempfile.gettempdir())
+    try:
+        return os.path.join(base, APP_NAME)
+    except Exception:
+        return os.path.join(tempfile.gettempdir(), APP_NAME)
+
+
+def _parse_dir_override(raw, label):
+    """解析可選目錄覆寫；只接受絕對路徑，無效時回 (None, 原因)。不建立目錄。"""
+    text = os.path.expandvars(os.path.expanduser((raw or "").strip()))
+    if not text:
+        return None, ""
+    if "\0" in text or not os.path.isabs(text):
+        return None, label + " 必須是絕對路徑"
+    try:
+        return os.path.realpath(text), ""
+    except (OSError, ValueError) as exc:
+        return None, label + " 路徑不合法：" + str(exc)
+
+
+DATA_DIR = _user_data_dir()
+_LOG_DIR, _LOG_DIR_ERROR = _parse_dir_override(
+    os.environ.get("SIMPLE_UI_LOG_DIR", ""), "SIMPLE_UI_LOG_DIR")
+LOG_DIR = _LOG_DIR or os.path.join(DATA_DIR, "logs")
+
+
+def _split_command(raw):
+    """把使用者明確提供的啟動指令拆成 argv；引號只拿來包含空白的路徑。"""
+    if not (raw or "").strip():
+        return []          # 沒設定就是沒設定，不是格式錯誤
+    try:
+        parts = shlex.split(raw, posix=False)
+    except ValueError as exc:
+        raise ValueError("COMFY_LAUNCH_CMD 格式不正確：" + str(exc))
+    argv = []
+    for p in parts:
+        if len(p) >= 2 and p[0] == p[-1] and p[0] in ("'", '"'):
+            p = p[1:-1]
+        if p:
+            argv.append(p)
+    if not argv:
+        raise ValueError("COMFY_LAUNCH_CMD 是空的")
+    return argv
+
+
+_COMFY_LAUNCH_ERROR = ""
+try:
+    COMFY_LAUNCH = _split_command(os.environ.get("COMFY_LAUNCH_CMD", ""))
+except ValueError as exc:
+    COMFY_LAUNCH = []
+    _COMFY_LAUNCH_ERROR = str(exc)
 
 
 def _parse_output_dir(raw):
@@ -111,15 +168,74 @@ NO_STORE = {".html", ".css", ".js", ".json"}
 
 _start_lock = threading.Lock()
 
-# ── WD14 圖片反推（獨立 CPU Worker，不動 ComfyUI）──────────────
-# 下面幾個路徑可用環境變數覆寫，純粹是為了測試時能指向別的檔案；
-# 一般使用不需要設定。
-WD14_PY = os.environ.get("WD14_PY", r"C:\ComfyUI\tools\wd14-venv\Scripts\python.exe")
-WD14_WORKER = os.environ.get("WD14_WORKER", r"C:\ComfyUI\tools\wd14_worker.py")
-# ViT v3：用已驗證的獨立 venv（含 onnx），CPU only
-WD14_VIT_PY = os.environ.get("WD14_VIT_PY", r"C:\ComfyUI\tools\wd14-vit-eval\venv\Scripts\python.exe")
-WD14_VIT_WORKER = os.environ.get("WD14_VIT_WORKER", r"C:\ComfyUI\tools\wd14_vit_worker.py")
-WD14_TMP = os.environ.get("WD14_TMP", r"C:\ComfyUI\tmp\wd14")  # 暫存圖片（不放進 simple_ui repo）
+# ── WD14 圖片反推（選用功能；沒有設定就不啟用，不碰開發者環境）──
+def _is_within(path, root):
+    try:
+        real_path = os.path.realpath(path)
+        real_root = os.path.realpath(root)
+        return os.path.commonpath([real_path, real_root]) == real_root
+    except (OSError, ValueError):
+        return False
+
+
+def _parse_wd14_file(raw):
+    text = os.path.expandvars(os.path.expanduser((raw or "").strip()))
+    return "" if "\0" in text else text
+
+
+def _parse_wd14_tmp(raw):
+    path, err = _parse_dir_override(raw, "WD14_TMP")
+    if err:
+        return "", err
+    if not path:
+        path = os.path.join(DATA_DIR, "wd14-tmp")   # 預設值也必須通過下面同一套安全檢查
+    real = os.path.realpath(path)
+    parent = os.path.dirname(real)
+    if real == parent:                      # 磁碟機根目錄，例如 C:\
+        return "", "WD14_TMP 不可指向磁碟機根目錄"
+    if _is_within(ROOT, real):              # 指向 Repo 的上層（會掃到整個專案）
+        return "", "WD14_TMP 不可指向 Repo 或其上層目錄"
+    if _is_within(real, ROOT):              # 指向 Repo 內部
+        return "", "WD14_TMP 不可位於 Repo 內"
+    if OUTPUT_DIR and (_is_within(real, OUTPUT_DIR) or _is_within(OUTPUT_DIR, real)):
+        return "", "WD14_TMP 不可與 COMFY_OUTPUT_DIR 重疊"
+    return real, ""
+
+
+WD14_PY = _parse_wd14_file(os.environ.get("WD14_PY", ""))
+WD14_WORKER = _parse_wd14_file(os.environ.get("WD14_WORKER", ""))
+WD14_VIT_PY = _parse_wd14_file(os.environ.get("WD14_VIT_PY", ""))
+WD14_VIT_WORKER = _parse_wd14_file(os.environ.get("WD14_VIT_WORKER", ""))
+WD14_TMP, _WD14_TMP_ERROR = _parse_wd14_tmp(os.environ.get("WD14_TMP", ""))
+
+
+def _looks_like_path(text):
+    return (os.path.sep in text or (os.path.altsep and os.path.altsep in text) or
+            re.match(r"^[A-Za-z]:", text) is not None)
+
+
+def wd14_missing_config(model):
+    """回傳 WD14 未安裝／未設定的白話原因；已完整設定則回空字串。"""
+    vit = str(model or "eva02").strip().lower() in (
+        "vit", "vit_v3", "vit-v3", "wd-vit-tagger-v3")
+    label = "ViT v3" if vit else "EVA02"
+    py = WD14_VIT_PY if vit else WD14_PY
+    worker = WD14_VIT_WORKER if vit else WD14_WORKER
+    py_var = "WD14_VIT_PY" if vit else "WD14_PY"
+    worker_var = "WD14_VIT_WORKER" if vit else "WD14_WORKER"
+    if not py or not worker:
+        missing = [v for v, val in ((py_var, py), (worker_var, worker)) if not val]
+        return ("WD14「%s」尚未設定：請設定 %s，指向你自己的 Python 與 Worker。"
+                "基本生圖不受影響。" % (label, " 與 ".join(missing)))
+    if _looks_like_path(py) and not os.path.isfile(py):
+        return "WD14「%s」的 %s 指向的檔案不存在；請檢查設定。" % (label, py_var)
+    if _looks_like_path(worker) and not os.path.isfile(worker):
+        return "WD14「%s」的 %s 指向的檔案不存在；請檢查設定。" % (label, worker_var)
+    if _WD14_TMP_ERROR:
+        return "WD14 暫存目錄設定無效（%s）；請檢查 WD14_TMP。" % _WD14_TMP_ERROR
+    return ""
+
+
 WD14_MAX_UPLOAD = 12 * 1024 * 1024             # base64 字串上限
 WD14_MAX_BYTES = 8 * 1024 * 1024               # 原始位元組上限
 WD14_MAX_DIM = 4096                            # 最長邊上限
@@ -177,29 +293,63 @@ def recycle(path):
 
 
 def start_comfy(wait_seconds=180):
-    """ComfyUI 沒開就把它開起來，回傳是否成功。"""
+    """回傳 (ok, code, message)。沒有明確啟動設定時不猜路徑、不啟動任何程式。"""
     if comfy_up():
-        return True
+        return True, "", ""
+    if _COMFY_LAUNCH_ERROR:
+        return False, "START_CONFIG_INVALID", _COMFY_LAUNCH_ERROR
+    if not COMFY_LAUNCH:
+        return False, "START_NOT_CONFIGURED", (
+            "尚未設定 ComfyUI 啟動指令，不會自動啟動任何程式。"
+            "請先自行啟動你的 ComfyUI；若要自動啟動，請設定 COMFY_LAUNCH_CMD。")
     with _start_lock:
         if comfy_up():
-            return True
-        os.makedirs(LOG_DIR, exist_ok=True)
-        out = open(os.path.join(LOG_DIR, "comfyui.log"), "ab", buffering=0)
-        err = open(os.path.join(LOG_DIR, "comfyui.err.log"), "ab", buffering=0)
-        args = [COMFY_PY, "-s", r"ComfyUI\main.py", "--windows-standalone-build"]
-        if OUTPUT_DIR:
+            return True, "", ""
+        args = list(COMFY_LAUNCH)
+        if OUTPUT_DIR and "--output-directory" not in args:
             args += ["--output-directory", OUTPUT_DIR]
-        subprocess.Popen(
-            args,
-            cwd=COMFY_ROOT, stdout=out, stderr=err,
-            creationflags=0x08000000,  # CREATE_NO_WINDOW
-        )
+        # 日誌是診斷用途，不可因為它不可寫就取消使用者明確指定的啟動。
+        log_notes = []
+        out = err = None
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            try:
+                out = open(os.path.join(LOG_DIR, "comfyui.log"), "ab", buffering=0)
+            except OSError as exc:
+                log_notes.append("無法開啟 comfyui.log：%s" % exc)
+            try:
+                err = open(os.path.join(LOG_DIR, "comfyui.err.log"), "ab", buffering=0)
+            except OSError as exc:
+                log_notes.append("無法開啟 comfyui.err.log：%s" % exc)
+        except OSError as exc:
+            log_notes.append("無法建立日誌目錄：%s" % exc)
+        if log_notes:
+            print("[simple-ui] 日誌不可用，ComfyUI 仍會啟動：" + "；".join(log_notes),
+                  file=sys.stderr, flush=True)
+        stdout_target = out if out is not None else subprocess.DEVNULL
+        stderr_target = err if err is not None else subprocess.DEVNULL
+        try:
+            subprocess.Popen(
+                args, stdout=stdout_target, stderr=stderr_target,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+            )
+        except OSError as exc:
+            return False, "START_FAILED", "啟動 ComfyUI 失敗：%s" % exc
+        finally:
+            for fh in (out, err):
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except OSError:
+                        pass
+        note = ("；日誌不可用，已略過記錄：" + "；".join(log_notes)) if log_notes else ""
         for _ in range(wait_seconds):
             if comfy_up():
                 time.sleep(1.5)
-                return True
+                return True, "", note
             time.sleep(1)
-        return False
+        return False, "START_TIMEOUT", (
+            "已送出啟動指令，但 ComfyUI 沒有在預期時間內連線；請檢查你啟動的程式。" + note)
 
 
 # ── 圖片格式判讀（不依賴 Pillow，直接看檔頭）────────────────────
@@ -265,21 +415,35 @@ def _purge_loop(interval=600):
             pass   # 選用功能的背景清理不得影響主服務
 
 
+# 只認 _reverse_inner() 自己產生的檔名：<毫秒時間戳>_<8位hex>.<已知圖片副檔名>
+WD14_TMP_NAME = re.compile(r"^\d{10,}_[0-9a-f]{8}\.(?:png|jpg|jpeg|webp|gif)$", re.I)
+
+
 def purge_wd14_tmp(ttl=WD14_TMP_TTL):
-    """清掉過期的暫存圖片（失敗或逾時留下來的）。"""
+    """只清 Sid-simple-ui 自己產生、過期且沒有逃出暫存目錄的暫存檔。"""
+    if not WD14_TMP or _WD14_TMP_ERROR:
+        return 0
     try:
-        if not os.path.isdir(WD14_TMP):
+        root = os.path.realpath(WD14_TMP)
+        if not os.path.isdir(root):
             return 0
         now = time.time()
         n = 0
-        for name in os.listdir(WD14_TMP):
-            p = os.path.join(WD14_TMP, name)
+        for name in os.listdir(root):
+            if not WD14_TMP_NAME.match(name):
+                continue
+            p = os.path.join(root, name)
             try:
-                if os.path.isfile(p) and now - os.path.getmtime(p) > ttl:
-                    os.remove(p)
-                    n += 1
+                rp = os.path.realpath(p)
+                if (os.path.dirname(rp) != root or os.path.islink(p) or
+                        not os.path.isfile(p)):
+                    continue
+                if now - os.path.getmtime(p) <= ttl:
+                    continue
+                os.remove(p)
+                n += 1
             except OSError:
-                pass
+                continue
         return n
     except Exception:
         return 0
@@ -312,9 +476,9 @@ class Wd14Worker:
 
     def _spawn(self):
         if not os.path.isfile(self.py):
-            raise RuntimeError("找不到 WD14 Python：" + self.py)
+            raise RuntimeError("找不到 WD14「%s」Python：%s" % (self.label, self.py or "尚未設定"))
         if not os.path.isfile(self.worker):
-            raise RuntimeError("找不到 WD14 Worker：" + self.worker)
+            raise RuntimeError("找不到 WD14「%s」Worker：%s" % (self.label, self.worker or "尚未設定"))
         os.makedirs(LOG_DIR, exist_ok=True)
         log_name = "wd14_worker.log" if self.label == "EVA02" else "wd14_vit_worker.log"
         errfile = open(os.path.join(LOG_DIR, log_name), "ab", buffering=0)
@@ -627,8 +791,12 @@ class H(http.server.BaseHTTPRequestHandler):
                     "code": "EXTERNAL_COMFY",
                     "error": "目前為外部連線模式（COMFY_URL=%s），請自行啟動 ComfyUI，或檢查 COMFY_URL 是否指向正確的 Port。" % COMFY,
                 })
-            ok = start_comfy()
-            return self._json(200 if ok else 504, {"ok": ok, "comfy": comfy_up()})
+            ok, code, msg = start_comfy()
+            if not ok and code:
+                return self._json(409, {"ok": False, "code": code,
+                                        "error": msg, "comfy": comfy_up()})
+            return self._json(200 if ok else 504,
+                              {"ok": ok, "comfy": comfy_up(), "error": msg})
         if self.path == "/api/check":
             return self._check_files()
         if self.path == "/api/delete":
@@ -923,11 +1091,16 @@ class H(http.server.BaseHTTPRequestHandler):
         threshold = clamp(data.get("threshold"), 0.35)
         character_threshold = clamp(data.get("character_threshold"), 0.85)
 
-        # 選擇模型：EVA02（預設）或 ViT v3
+        # 選擇模型：EVA02（預設）或 ViT v3；兩套設定必須各自完整
         model = str(data.get("model") or "eva02").strip().lower()
-        worker = WD14_VIT if model in ("vit", "vit_v3", "vit-v3", "wd-vit-tagger-v3") else WD14
+        vit = model in ("vit", "vit_v3", "vit-v3", "wd-vit-tagger-v3")
+        worker = WD14_VIT if vit else WD14
+        missing = wd14_missing_config(model)
+        if missing:
+            return self._json(503, {"ok": False, "code": "WD14_NOT_CONFIGURED",
+                                    "error": missing})
 
-        # 寫進專用暫存目錄（不放 simple_ui repo），用完立刻刪
+        # 寫進 Sid-simple-ui 自己管理的暫存目錄（不放 Repo），用完立刻刪
         try:
             os.makedirs(WD14_TMP, exist_ok=True)
             name = "%d_%s%s" % (int(time.time() * 1000), os.urandom(4).hex(), ext)
@@ -1010,8 +1183,13 @@ class H(http.server.BaseHTTPRequestHandler):
                 head += chunk
                 if len(head) > 65536:
                     raise OSError("handshake too large")
-            if b" 101 " not in head.split(b"\r\n", 1)[0]:
-                raise OSError("ComfyUI 拒絕 WebSocket：" + head.split(b"\r\n", 1)[0].decode(errors="replace"))
+            # 同一次 recv 可能同時收到 handshake header 與後續 frame，
+            # 必須把 \r\n\r\n 之後的 bytes 留下來轉送，不能只檢查狀態就丟掉。
+            idx = head.find(b"\r\n\r\n")
+            header, trailing = head[:idx + 4], head[idx + 4:]
+            first_line = header.split(b"\r\n", 1)[0]
+            if b" 101 " not in first_line:
+                raise OSError("ComfyUI 拒絕 WebSocket：" + first_line.decode(errors="replace"))
 
             accept = base64.b64encode(hashlib.sha1((ckey + self.WS_GUID).encode()).digest()).decode()
             self.wfile.write((
@@ -1020,6 +1198,24 @@ class H(http.server.BaseHTTPRequestHandler):
                 "Connection: Upgrade\r\n"
                 "Sec-WebSocket-Accept: %s\r\n\r\n" % accept).encode())
             self.wfile.flush()
+            if trailing:
+                self.wfile.write(trailing)   # 原封不動，不解碼、不重組 frame
+                self.wfile.flush()
+
+            # 前端可能已提早送出 frame，被 http.server 的 rfile 讀進 buffer；
+            # 在進入純 byte pump 前補送給 upstream，避免遺失 client 資料。
+            self.connection.settimeout(0.05)
+            try:
+                while True:
+                    try:
+                        chunk = self.rfile.read1(65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    up.sendall(chunk)
+            finally:
+                self.connection.settimeout(None)
         except OSError as e:
             up.close()
             return self._json(502, {"error": str(e)})
