@@ -15,6 +15,57 @@ $script:ComfyRoot    = 'C:\ComfyUI\ComfyUI_windows_portable'
 $script:ServerScript = 'C:\ComfyUI\simple_ui\server.py'
 $script:Logs         = 'C:\ComfyUI\logs'
 
+# 本機 WD14 資源只存在於這台開發電腦；絕對路徑刻意只放在本機啟動器，
+# 不寫入公開版 server.py。公開使用者不會使用這個啟動器，也不會受影響。
+$script:LocalWd14 = [ordered]@{
+    WD14_PY         = 'C:\ComfyUI\tools\wd14-venv\Scripts\python.exe'
+    WD14_WORKER     = 'C:\ComfyUI\tools\wd14_worker.py'
+    WD14_VIT_PY     = 'C:\ComfyUI\tools\wd14-vit-eval\venv\Scripts\python.exe'
+    WD14_VIT_WORKER = 'C:\ComfyUI\tools\wd14_vit_worker.py'
+}
+
+# 回傳缺少的項目（含完整路徑）；空陣列代表本機 WD14 完整可用。
+function Test-LocalWd14Ready {
+    $missing = @()
+    foreach ($name in $script:LocalWd14.Keys) {
+        $path = $script:LocalWd14[$name]
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            $missing += "$name ($path)"
+        }
+    }
+    return $missing
+}
+
+# 暫時寫入目前 Process 環境，讓緊接著 Start-Process 的 server.py 子程序繼承。
+# 回傳快照給 Restore-LocalWd14Env 在 finally 還原（不設使用者／系統層級變數）。
+function Set-LocalWd14Env {
+    $saved = @()
+    foreach ($name in $script:LocalWd14.Keys) {
+        $old = [System.Environment]::GetEnvironmentVariable($name, 'Process')
+        $saved += [pscustomobject]@{
+            Name   = $name
+            Value  = $old
+            WasSet = ($null -ne $old)
+        }
+        [System.Environment]::SetEnvironmentVariable($name, $script:LocalWd14[$name], 'Process')
+    }
+    return $saved
+}
+
+# 還原成啟動前的狀態；本來不存在的變數要移除，不能留下空字串。
+function Restore-LocalWd14Env {
+    param([object[]]$Saved)
+    foreach ($s in $Saved) {
+        if ($null -eq $s) { continue }
+        if ($s.WasSet) {
+            [System.Environment]::SetEnvironmentVariable($s.Name, $s.Value, 'Process')
+        } else {
+            # 設成空字串不等於「未設定」：要真正移除，子程序才不會看到空值
+            Remove-Item -LiteralPath ("Env:" + $s.Name) -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # 完整路徑比對，找出本專案的 process。
 # 絕對不要用 taskkill /IM python.exe /F —— 那會把 ComfyUI 一起殺掉。
 function Get-ManagedProcesses {
@@ -81,7 +132,7 @@ function Stop-Ui {
 function Start-Ui {
     param([scriptblock]$OnTick)
 
-    $r = [pscustomobject]@{ Ok = $false; Cleaned = 0; Message = '' }
+    $r = [pscustomobject]@{ Ok = $false; Cleaned = 0; Wd14 = ''; Message = '' }
     try {
         New-Item -ItemType Directory -Path $script:Logs -Force | Out-Null
 
@@ -110,13 +161,37 @@ function Start-Ui {
         }
 
         # 3) 生圖介面 server.py (7860)
-        if (-not (Test-PortUp 7860)) {
-            Invoke-Tick $OnTick '正在啟動生圖介面…'
-            Start-Process -FilePath $script:Python -ArgumentList $script:ServerScript -WindowStyle Hidden -RedirectStandardOutput "$script:Logs\server.log" -RedirectStandardError "$script:Logs\server.err.log"
-            for ($i = 0; $i -lt 15 -and -not (Test-PortUp 7860); $i++) {
-                Start-Sleep 1
-                Invoke-Tick $OnTick "正在啟動生圖介面… ($($i + 1)/15)"
+        # 本機 WD14 只在「本次確實啟動新的 server.py」時才注入目前 Process 環境，
+        # 讓子程序繼承；啟動後於 finally 還原，不污染其他程式或 PowerShell 工作階段。
+        # 若 7860 已有既存 Server，不能對它宣稱已載入 WD14。
+        $uiAlreadyUp = Test-PortUp 7860
+        $willLaunchUi = -not $uiAlreadyUp
+        $wd14Missing = @()
+        if ($willLaunchUi) {
+            $wd14Missing = @(Test-LocalWd14Ready)
+            if ($wd14Missing.Count -eq 0) {
+                $r.Wd14 = '本機 WD14 已設定（EVA02 與 ViT v3 皆可用）。'
+            } else {
+                # 沒有本機 WD14 也照樣啟動基本生圖，但必須明確告知，不可靜默略過。
+                $r.Wd14 = "本機 WD14 資源不完整（缺 $($wd14Missing -join '、')），反推功能無法使用；基本生圖不受影響。若要啟用，請確認上述檔案存在。"
             }
+        } else {
+            # 既存 Server 不是本次啟動，沒有被注入；不可暗示反推已恢復。
+            $r.Wd14 = '生圖介面已在運行；本次沒有重新啟動，因此無法確認目前介面是否已載入 WD14 設定。若反推無法使用，需在適當時機重新啟動生圖介面。'
+        }
+        $wd14Saved = $null
+        try {
+            if ($willLaunchUi) {
+                if ($wd14Missing.Count -eq 0) { $wd14Saved = Set-LocalWd14Env }
+                Invoke-Tick $OnTick '正在啟動生圖介面…'
+                Start-Process -FilePath $script:Python -ArgumentList $script:ServerScript -WindowStyle Hidden -RedirectStandardOutput "$script:Logs\server.log" -RedirectStandardError "$script:Logs\server.err.log"
+                for ($i = 0; $i -lt 15 -and -not (Test-PortUp 7860); $i++) {
+                    Start-Sleep 1
+                    Invoke-Tick $OnTick "正在啟動生圖介面… ($($i + 1)/15)"
+                }
+            }
+        } finally {
+            if ($wd14Saved) { Restore-LocalWd14Env -Saved $wd14Saved }
         }
 
         $comfyUp = Test-PortUp 8188
@@ -124,15 +199,15 @@ function Start-Ui {
         if ($comfyUp -and $uiUp) {
             $extra = if ($r.Cleaned -gt 0) { "（已清除 $($r.Cleaned) 個重複的舊介面程序）" } else { '' }
             $r.Ok = $true
-            $r.Message = "已啟動：ComfyUI 與生圖介面都在運行$extra，可以開始生圖了。"
+            $r.Message = "已啟動：ComfyUI 與生圖介面都在運行$extra，可以開始生圖了。 $($r.Wd14)"
         } else {
             $bad = @()
             if (-not $comfyUp) { $bad += 'ComfyUI' }
             if (-not $uiUp)    { $bad += '生圖介面' }
-            $r.Message = "$($bad -join '、') 啟動失敗，請查看 C:\ComfyUI\logs 裡的錯誤訊息。"
+            $r.Message = "$($bad -join '、') 啟動失敗，請查看 C:\ComfyUI\logs 裡的錯誤訊息。 $($r.Wd14)"
         }
     } catch {
-        $r.Message = "啟動時發生問題：$($_.Exception.Message)"
+        $r.Message = "啟動時發生問題：$($_.Exception.Message) $($r.Wd14)"
     }
     return $r
 }
