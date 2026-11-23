@@ -181,7 +181,10 @@ def _purge_loop(interval=600):
     """定期清掉過期的反推暫存圖（逾時放著的檔案靠這個收尾）。"""
     while True:
         time.sleep(interval)
-        purge_wd14_tmp()
+        try:
+            purge_wd14_tmp()
+        except Exception:
+            pass   # 選用功能的背景清理不得影響主服務
 
 
 def purge_wd14_tmp(ttl=WD14_TMP_TTL):
@@ -875,7 +878,7 @@ class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def main():
     os.makedirs(ASSETS, exist_ok=True)
-    os.makedirs(WD14_TMP, exist_ok=True)
+    # WD14 暫存目錄改為按需建立（見 _reverse_inner）：基本服務不依賴選用功能
     threading.Thread(target=_purge_loop, daemon=True).start()
     n = purge_wd14_tmp()
     if n:
