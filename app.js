@@ -26,7 +26,7 @@
   }
 
   const S = {
-    running: false, starting: false, cancelled: false, promptId: null, comfyUp: false,
+    running: false, starting: false, cancelled: false, promptId: null, comfyUp: false, external: false,
     settings: Object.assign({}, DEFAULTS, loadJSON("ui.settings", {})),
     gallery: loadJSON("ui.gallery", []),
     results: [], lbList: [], lbIndex: 0, queue: 0,
@@ -104,6 +104,11 @@
   /* ── ComfyUI 狀態 ──────────────────────────────────────── */
   async function checkComfy(silent) {
     if (!silent) setStatus("checking", "檢查 ComfyUI…");
+    // 外部模式由後端 /api/status 提供；即使 ComfyUI 檢查失敗也要先知道，避免顯示錯誤的「點我開啟」
+    try {
+      const st = await fetch("/api/status", { cache: "no-store" }).then(r => r.json());
+      if (st && typeof st.external === "boolean") S.external = st.external;
+    } catch (e) { /* 保持前一次已知狀態 */ }
     try {
       const r = await fetch("/comfy/system_stats", { cache: "no-store" });
       if (!r.ok) throw new Error(String(r.status));
@@ -114,7 +119,7 @@
       return true;
     } catch (e) {
       S.comfyUp = false;
-      setStatus("down", "ComfyUI 沒開 · 點我開啟");
+      setStatus("down", S.external ? "ComfyUI 未連線 · 外部模式" : "ComfyUI 沒開 · 點我開啟");
       return false;
     }
   }
@@ -131,7 +136,7 @@
     toast("正在啟動 ComfyUI，第一次要 20～40 秒…", "warn", 5000);
     try {
       const r = await fetch("/start-comfy", { method: "POST" });
-      const j = await r.json();
+      const j = await r.json().catch(() => ({}));
       if (j.ok) {
         S.comfyUp = true;
         setStatus("up", "ComfyUI 已連線");
@@ -139,6 +144,13 @@
         connectWS();
         await loadCkpts();
         return true;
+      }
+      // 外部連線模式：後端拒絕代啟動，直接顯示原因，不重試、不誤導去看 logs
+      if (j.code === "EXTERNAL_COMFY") {
+        S.comfyUp = false;
+        setStatus("down", "ComfyUI 未連線 · 外部模式");
+        toast(j.error || "目前是外部連線模式，請自行啟動 ComfyUI", "warn", 6000);
+        return false;
       }
     } catch (e) { /* 下面統一處理 */ }
     setStatus("down", "ComfyUI 開不起來 · 點我重試");
@@ -149,6 +161,7 @@
   async function ensureComfy() {
     if (S.comfyUp) return true;
     if (await checkComfy(true)) return true;
+    if (S.external) return false;   // 外部模式不代啟動，交給使用者
     return startComfy();
   }
 
@@ -1526,10 +1539,15 @@
       if (innerWidth <= 1100 && settingsPanel.classList.contains("collapsed")) setCollapsed(false);
     });
 
-    // 狀態列：點一下 = 檢查 / 啟動
+    // 狀態列：點一下 = 檢查 / 啟動（外部模式只提示，不代啟動）
     $("statusPill").onclick = async () => {
       const ok = await checkComfy(true);
-      if (!ok) startComfy();
+      if (ok) return;
+      if (S.external) {
+        toast("目前是外部連線模式，請自行啟動 ComfyUI，或檢查 COMFY_URL 的設定。", "warn", 6000);
+        return;
+      }
+      startComfy();
     };
 
     // 舞台事件
@@ -1657,6 +1675,7 @@
     // 輸出資料夾：由後端回報，不在前端寫死路徑
     fetch("/api/status", { cache: "no-store" }).then(r => r.json()).then(j => {
       if (j && j.output) { S.outDir = j.output; $("outPath").textContent = "圖片存到 " + j.output; }
+      if (j && typeof j.external === "boolean") S.external = j.external;
     }).catch(() => { /* 保持預設文字 */ });
 
     // ComfyUI 狀態：開場檢查 + 每 20 秒輕量更新

@@ -4,7 +4,7 @@
 
 負責三件事：
   1. 提供 simple_ui 底下的靜態檔（.html / .css / .js / assets 圖檔）
-  2. 把 /comfy/* 反向代理到 ComfyUI（127.0.0.1:8188）
+  2. 把 /comfy/* 反向代理到 ComfyUI（預設 127.0.0.1:8188，可用 COMFY_URL 覆寫）
   3. /start-comfy 一鍵啟動 ComfyUI、/open-output 開啟圖片資料夾
 """
 
@@ -25,7 +25,51 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-COMFY = "http://127.0.0.1:8188"
+def _parse_comfy_url(raw):
+    """解析 COMFY_URL；只允許本機 loopback。回傳 (base, host, port, scheme, external)。"""
+    text = (raw or "").strip()
+    if not text:
+        return "http://127.0.0.1:8188", "127.0.0.1", 8188, "http", False
+    # 空的 ? / # 不會出現在 parts.query / parts.fragment，必須直接檢查原始字串
+    if "?" in text or "#" in text:
+        raise ValueError("COMFY_URL 不可包含 query 或 fragment（含空的 ? 或 # 分隔符）")
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except Exception as exc:
+        raise ValueError("COMFY_URL 格式不正確：%s" % exc)
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError("COMFY_URL 只支援 http 或 https，目前是「%s」" % (parts.scheme or "空白"))
+    host = (parts.hostname or "").lower()
+    if host not in ("127.0.0.1", "localhost"):
+        raise ValueError("COMFY_URL 只支援本機 127.0.0.1 或 localhost，目前是「%s」" % (parts.hostname or "空白"))
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("COMFY_URL 不可包含帳號或密碼")
+    if parts.query or parts.fragment:
+        raise ValueError("COMFY_URL 不可包含 query 或 fragment")
+    if parts.path not in ("", "/"):
+        raise ValueError("COMFY_URL 不可包含路徑，請只填到 port（例：http://127.0.0.1:8189）")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("COMFY_URL 的 port 不合法：%s" % exc)
+    if port is None:
+        raise ValueError("COMFY_URL 必須明確指定 port（例：http://127.0.0.1:8189）")
+    if not 1 <= port <= 65535:
+        raise ValueError("COMFY_URL 的 port 必須在 1～65535 之間，目前是 %s" % port)
+    return "%s://%s:%d" % (scheme, host, port), host, port, scheme, True
+
+
+_COMFY_ERROR = ""
+try:
+    COMFY, COMFY_HOST, COMFY_PORT, COMFY_SCHEME, COMFY_EXTERNAL = _parse_comfy_url(
+        os.environ.get("COMFY_URL", ""))
+except ValueError as exc:
+    # 設定錯誤時不靜默退回預設：main() 會在啟動前明確終止
+    COMFY, COMFY_HOST, COMFY_PORT, COMFY_SCHEME, COMFY_EXTERNAL = (
+        "http://127.0.0.1:8188", "127.0.0.1", 8188, "http", False)
+    _COMFY_ERROR = str(exc)
+
 COMFY_ROOT = r"C:\ComfyUI\ComfyUI_windows_portable"
 COMFY_PY = os.path.join(COMFY_ROOT, "python_embeded", "python.exe")
 LOG_DIR = r"C:\ComfyUI\logs"
@@ -65,6 +109,11 @@ def port_open(port, host="127.0.0.1"):
         return s.connect_ex((host, port)) == 0
 
 
+def comfy_up():
+    """檢查目前 COMFY_URL 指向的 ComfyUI 是否正在監聽。"""
+    return port_open(COMFY_PORT, COMFY_HOST)
+
+
 def recycle(path):
     """丟到 Windows 資源回收筒（失敗就回 False，由呼叫端決定要不要硬刪）。"""
     try:
@@ -102,10 +151,10 @@ def recycle(path):
 
 def start_comfy(wait_seconds=180):
     """ComfyUI 沒開就把它開起來，回傳是否成功。"""
-    if port_open(8188):
+    if comfy_up():
         return True
     with _start_lock:
-        if port_open(8188):
+        if comfy_up():
             return True
         os.makedirs(LOG_DIR, exist_ok=True)
         out = open(os.path.join(LOG_DIR, "comfyui.log"), "ab", buffering=0)
@@ -117,7 +166,7 @@ def start_comfy(wait_seconds=180):
             creationflags=0x08000000,  # CREATE_NO_WINDOW
         )
         for _ in range(wait_seconds):
-            if port_open(8188):
+            if comfy_up():
                 time.sleep(1.5)
                 return True
             time.sleep(1)
@@ -515,7 +564,8 @@ class H(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json(500, {"ok": False, "error": str(e)})
         if self.path == "/api/status":
-            return self._json(200, {"comfy": port_open(8188), "output": OUTPUT_DIR})
+            return self._json(200, {"comfy": comfy_up(), "output": OUTPUT_DIR,
+                                    "external": COMFY_EXTERNAL})
         if self.path == "/api/check":
             return self._json(405, {"error": "use POST"})
         if self.path == "/api/reverse":
@@ -536,8 +586,14 @@ class H(http.server.BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", 0) or 0)
             if n:
                 self.rfile.read(n)
+            if COMFY_EXTERNAL:
+                return self._json(409, {
+                    "ok": False,
+                    "code": "EXTERNAL_COMFY",
+                    "error": "目前為外部連線模式（COMFY_URL=%s），請自行啟動 ComfyUI，或檢查 COMFY_URL 是否指向正確的 Port。" % COMFY,
+                })
             ok = start_comfy()
-            return self._json(200 if ok else 504, {"ok": ok, "comfy": port_open(8188)})
+            return self._json(200 if ok else 504, {"ok": ok, "comfy": comfy_up()})
         if self.path == "/api/check":
             return self._check_files()
         if self.path == "/api/delete":
@@ -561,7 +617,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._json(400, {"error": "files must be a list"})
 
         # ComfyUI 沒開就全部當成「還在」，避免誤刪歷史紀錄
-        if not port_open(8188):
+        if not comfy_up():
             return self._json(200, {"missing": [], "comfy": False, "total": len(files)})
 
         missing = []
@@ -774,11 +830,14 @@ class H(http.server.BaseHTTPRequestHandler):
         ckey = self.headers.get("Sec-WebSocket-Key")
         if not ckey:
             return self._json(400, {"error": "missing Sec-WebSocket-Key"})
-        if not port_open(8188):
+        if not comfy_up():
             return self._json(503, {"error": "ComfyUI not running"})
 
         try:
-            up = socket.create_connection(("127.0.0.1", 8188), timeout=10)
+            up = socket.create_connection((COMFY_HOST, COMFY_PORT), timeout=10)
+            if COMFY_SCHEME == "https":
+                import ssl
+                up = ssl.create_default_context().wrap_socket(up, server_hostname=COMFY_HOST)
         except OSError as e:
             return self._json(502, {"error": str(e)})
 
@@ -786,12 +845,13 @@ class H(http.server.BaseHTTPRequestHandler):
             ukey = base64.b64encode(os.urandom(16)).decode()
             handshake = (
                 "GET %s HTTP/1.1\r\n"
-                "Host: 127.0.0.1:8188\r\n"
-                "Origin: http://127.0.0.1:8188\r\n"
+                "Host: %s:%d\r\n"
+                "Origin: %s\r\n"
                 "Upgrade: websocket\r\n"
                 "Connection: Upgrade\r\n"
                 "Sec-WebSocket-Key: %s\r\n"
-                "Sec-WebSocket-Version: 13\r\n\r\n" % (self.path, ukey)
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+                % (self.path, COMFY_HOST, COMFY_PORT, COMFY, ukey)
             )
             up.sendall(handshake.encode())
             head = b""
@@ -877,13 +937,17 @@ class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def main():
+    if _COMFY_ERROR:
+        print("COMFY_URL 設定錯誤：" + _COMFY_ERROR, file=sys.stderr)
+        print("正確範例：COMFY_URL=http://127.0.0.1:8189 python server.py", file=sys.stderr)
+        raise SystemExit(2)
     os.makedirs(ASSETS, exist_ok=True)
     # WD14 暫存目錄改為按需建立（見 _reverse_inner）：基本服務不依賴選用功能
     threading.Thread(target=_purge_loop, daemon=True).start()
     n = purge_wd14_tmp()
     if n:
         print("清掉 %d 個過期的反推暫存檔" % n)
-    print("簡易生圖: http://127.0.0.1:7860  (ComfyUI: %s)" % ("已連線" if port_open(8188) else "未啟動"))
+    print("簡易生圖: http://127.0.0.1:7860  (ComfyUI: %s)" % ("已連線" if comfy_up() else "未啟動"))
     port = int(os.environ.get("SIMPLE_UI_PORT", "7860") or 7860)
     try:
         S(("127.0.0.1", port), H).serve_forever()
