@@ -46,14 +46,21 @@
     <!-- 左：標籤庫 -->
     <section class="panel library" aria-label="標籤庫">
       <div class="lib-top">
+        <!-- 搜尋是唯一的主要入口 -->
         <div class="search">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg>
           <input id="search" type="search" placeholder="搜尋標籤，中文或英文都行" autocomplete="off" aria-label="搜尋標籤">
         </div>
-        <button id="btnEn" class="mini-toggle" type="button" aria-pressed="false" title="標籤同時顯示英文">EN</button>
-        <button id="btnRandom" class="mini-toggle mini-icon" type="button" title="隨機配一組標籤" aria-label="隨機配一組標籤">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.2"/><circle cx="15.5" cy="15.5" r="1.2"/><circle cx="15.5" cy="8.5" r="1.2"/><circle cx="8.5" cy="15.5" r="1.2"/></svg>
-        </button>
+        <!-- 次要操作成組：EN / 18+ / 隨機（18+ 由 tags.js 插入，維持既有存取邏輯） -->
+        <div class="lib-tools">
+          <button id="searchState" class="search-state" type="button" title="清除搜尋" hidden>搜尋中 · <b id="searchTerm"></b></button>
+          <div class="tool-group" id="libTools" role="group" aria-label="顯示與隨機">
+            <button id="btnEn" class="tool-btn" type="button" aria-pressed="false" title="標籤同時顯示英文">EN</button>
+            <button id="btnRandom" class="tool-btn tool-icon" type="button" title="隨機配一組標籤" aria-label="隨機配一組標籤">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.2"/><circle cx="15.5" cy="15.5" r="1.2"/><circle cx="15.5" cy="8.5" r="1.2"/><circle cx="8.5" cy="15.5" r="1.2"/></svg>
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- 分類導航：單排橫向，空間不足可捲動 -->
@@ -226,7 +233,8 @@
   <!-- ── 底列：已選標籤 + 生成 ─────────────────────────── -->
   <footer class="actionbar">
     <div class="selwrap">
-      <span id="selCount" class="sel-count">還沒選標籤</span>
+      <span id="selCount" class="sel-count"><span class="sel-label">還沒選標籤</span></span>
+      <span id="sortModeWrap" class="sort-mode-wrap"></span>
       <div id="selBar" class="sel-bar"></div>
     </div>
     <button id="seedLock" class="seed-lock" type="button" hidden title="種子目前固定，每次會畫出同樣的構圖。點一下改回每次隨機">
@@ -296,7 +304,7 @@
           <div id="revCatWarn" class="rev-cat-warn" hidden>分類資料沒有載入，先改用簡易顯示。重新整理頁面再試一次。</div>
           <div id="revCats" class="rev-cats" role="tablist" aria-label="標籤分類"></div>
           <div id="revModes" class="rev-modes" role="group" aria-label="快速提取">
-            <button type="button" class="btn btn-ghost btn-sm rev-mode-btn on" data-mode="all">全部保留</button>
+            <button type="button" class="btn btn-ghost btn-sm rev-mode-btn on" data-mode="all">全部標籤</button>
             <button type="button" class="btn btn-ghost btn-sm rev-mode-btn" data-mode="character">只要角色</button>
             <button type="button" class="btn btn-ghost btn-sm rev-mode-btn" data-mode="clothing">只要服裝</button>
             <button type="button" class="btn btn-ghost btn-sm rev-mode-btn" data-mode="body">只要人物設計</button>
@@ -307,21 +315,21 @@
           <div class="rev-group-head">
             <h3>標籤 <span id="revTagCount" class="meta"></span></h3>
             <div class="rev-group-acts">
-              <button type="button" class="btn btn-ghost btn-sm" id="revSelAll">全選</button>
-              <button type="button" class="btn btn-ghost btn-sm" id="revSelNone">全取消</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="revSelAll" title="選取目前分類與模式下顯示的標籤">選取目前顯示</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="revSelNone" title="取消目前分類與模式下顯示的標籤">取消目前顯示</button>
             </div>
           </div>
           <div id="revTags" class="rev-tags"></div>
 
           <div class="rev-picked">
             <div class="rev-picked-head">
-              <b id="revSelCount">已選 0 個</b>
-              <button type="button" class="btn btn-ghost btn-sm" id="revClear">清空暫存</button>
+              <b id="revSelCount" aria-live="polite">已選 0 個</b>
+              <button type="button" class="btn btn-ghost btn-sm" id="revClear" disabled>清空暫存</button>
             </div>
             <div id="revSelList" class="rev-picked-list"></div>
           </div>
 
-          <p class="meta">分級只供參考，不會加進提示詞。勾選想用的標籤，再按右下角的「加入提示詞」。</p>
+          <p class="meta">標籤分數僅供參考。反推結果不會自動加入；請點選想保留的標籤，再按「加入提示詞」。切換分類不會清除其他分類已選的項目。</p>
         </div>
       </div>
 

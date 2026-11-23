@@ -38,12 +38,233 @@
     Z[e] = z;
   }));
 
-  const state = { sel: [], saved: [], cat: "常用", q: "", adult: false, showEn: false, moreCats: false, learned: { general: [], positive: [], negative: [] } };
+  /* ── 個人標籤統計（Phase 1）─────────────────────────────────
+     資料品質：權威正規化「只」認內建 CATS 與 dict.js，不認 L。
+     L 在執行期會被 ensureLearnedCategory() 塞入個人學習標籤，
+     拿 matchTag() 當權威會把舊的錯誤學習資料當成標準標籤。
+     跨分頁：每次成功生成寫一個專屬 evt key（jobId 唯一）；
+     收藏只寫該標籤的 fav key；ui.tagStats 是可重建的物化快照。 */
+  const STATS_KEY = "ui.tagStats";
+  const EVT_PREFIX = "ui.tagStats.evt.";
+  const FAV_PREFIX = "ui.tagStats.fav.";
+  const BROKEN_PREFIX = "ui.tagStats.broken.";
+  const STATS_VERSION = 1;
+  // 不自動壓縮 evt key：localStorage 沒有 atomic compare-and-set，
+  // 兩分頁同時折入事件再刪除 key 會永久遺失計數。詳見 devtools/reports/
+  // tag-learning-phase1-review-fixes.md。事件一律保留，由重建加總。
+
+  const CANON_ALT = Object.create(null);   // 正規化 alt → CATS canonical
+  const CANON_ZH = Object.create(null);    // 已知中文 → CATS canonical
+  const CANON_ONLY = Object.create(null);  // canonical 集合（供個人分類計數）
+  CATS.forEach(([cat, blob]) => {
+    if (/^已學習·/.test(cat)) return;       // 動態學習資料不得成為權威
+    blob.split("|").forEach(p => {
+      if (!p) return;
+      const parts = p.split(":");
+      const enField = parts[0] || "";
+      const canonical = enField.split("/")[0].trim();
+      if (!canonical) return;
+      CANON_ONLY[canonical] = true;
+      enField.split("/").forEach(alt => {
+        const k = norm(alt);
+        if (k && !CANON_ALT[k]) CANON_ALT[k] = canonical;
+      });
+      // CATS 明確存在的完整複合別名（a/b）也要能整串輸入。
+      // 只登錄 CATS 寫死的組合，绝不拆開使用者任意輸入的 foo/bar 猜測。
+      if (enField.indexOf("/") >= 0) {
+        const full = norm(enField);
+        if (full && !CANON_ALT[full]) CANON_ALT[full] = canonical;
+      }
+      const zh = (parts[1] || "").trim();
+      if (/[\u4e00-\u9fff]/.test(zh) && norm(zh) !== norm(canonical) && !CANON_ZH[zh]) {
+        CANON_ZH[zh] = canonical;
+      }
+    });
+  });
+  if (window.Dict && window.Dict.DICT) {
+    Object.keys(window.Dict.DICT).forEach(zh => {
+      const c = CANON_ALT[norm(window.Dict.DICT[zh])];
+      if (c && !CANON_ZH[zh]) CANON_ZH[zh] = c;
+    });
+  }
+
+  /** prompt token → 權威標準標籤；認不出來回 null，不猜測、不統計。 */
+  function canonicalTag(raw) {
+    let s = String(raw == null ? "" : raw).trim();
+    if (!s) return null;
+    const wrapped = s.match(/^\((.*)\)$/);
+    if (wrapped) s = wrapped[1].trim();
+    const ci = s.indexOf(":");
+    if (ci >= 0) s = s.slice(0, ci).trim();
+    if (!s || /[,\r\n]/.test(s)) return null;
+    const n = norm(s);
+    if (CANON_ALT[n]) return CANON_ALT[n];
+    if (CANON_ZH[s]) return CANON_ZH[s];
+    if (CANON_ZH[n]) return CANON_ZH[n];
+    return null;
+  }
+
+  let stats = { version: STATS_VERSION, tags: {}, updatedAt: 0 };
+
+  function num(v) { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; }
+  function safeParse(raw) { try { return JSON.parse(raw); } catch (e) { return undefined; } }
+  function keysWith(prefix) {
+    const out = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.indexOf(prefix) === 0) out.push(k);
+      }
+    } catch (e) { /* 無痕模式 */ }
+    return out;
+  }
+  function newRecord() { return { positiveCount: 0, negativeCount: 0, lastUsedAt: 0, favorite: false }; }
+  function recOf(tags, key) { if (!tags[key]) tags[key] = newRecord(); return tags[key]; }
+
+  function readSnapshot() {
+    let raw = null;
+    try { raw = localStorage.getItem(STATS_KEY); } catch (e) { return {}; }
+    if (!raw) return {};
+    const o = safeParse(raw);
+    const bad = !o || typeof o !== "object" || Array.isArray(o) ||
+      o.version !== STATS_VERSION || !o.tags || typeof o.tags !== "object" || Array.isArray(o.tags);
+    if (bad) {
+      // 損壞／未知版本：先原樣備份再移除，绝不直接覆蓋掉使用者的原始資料
+      try {
+        localStorage.setItem(BROKEN_PREFIX + Date.now(), raw);
+        localStorage.removeItem(STATS_KEY);
+      } catch (e) { /* 配額不足就放棄備份，仍需能繼續使用 */ }
+      return {};
+    }
+    return o.tags;
+  }
+
+  /** 由 snapshot + evt keys + fav keys 重建統計；結果是確定性的，並行寫入也收斂。 */
+  function rebuildStats(persist) {
+    const base = readSnapshot();
+    const tags = Object.create(null);
+    Object.keys(base).forEach(k => {
+      const r = base[k];
+      if (!r || typeof r !== "object") return;
+      tags[k] = {
+        positiveCount: num(r.positiveCount),
+        negativeCount: num(r.negativeCount),
+        lastUsedAt: num(r.lastUsedAt),
+        favorite: !!r.favorite
+      };
+    });
+    // 每個成功生成一個 evt key；同一任務的標籤在寫入時已去重
+    keysWith(EVT_PREFIX).forEach(k => {
+      const ev = safeParse(localStorage.getItem(k));
+      if (!ev || typeof ev !== "object") return;
+      const at = num(ev.at) || Date.now();
+      [["pos", "positiveCount"], ["neg", "negativeCount"]].forEach(pair => {
+        const arr = Array.isArray(ev[pair[0]]) ? ev[pair[0]] : [];
+        const seen = Object.create(null);
+        arr.forEach(raw => {
+          const c = canonicalTag(raw);
+          if (!c || seen[c]) return;
+          seen[c] = true;
+          const r = recOf(tags, c);
+          r[pair[1]] += 1;
+          if (at > r.lastUsedAt) r.lastUsedAt = at;
+        });
+      });
+    });
+    // 收藏：一標籤一 key；以 at 判新舊，同一時間點以「取消」為準（保守）
+    const favAt = Object.create(null);
+    keysWith(FAV_PREFIX).forEach(k => {
+      const f = safeParse(localStorage.getItem(k));
+      if (!f || typeof f !== "object") return;
+      const c = canonicalTag(f.tag);
+      if (!c) return;
+      const r = recOf(tags, c);
+      const at = num(f.at);
+      const prev = favAt[c];
+      if (prev === undefined || at > prev || (at === prev && f.favorite === false)) {
+        r.favorite = !!f.favorite;
+        favAt[c] = at;
+      }
+    });
+    stats = { version: STATS_VERSION, tags, updatedAt: Date.now() };
+    if (persist) {
+      // 重要：ui.tagStats 存的是「已折入的 base」，絕不能把 live evt 的計數也寫進去，
+      // 否則下次重建會 base + evt 再算一次（舊分頁快照覆蓋也是同一個坑）。
+      const baseOut = {};
+      Object.keys(base).forEach(k => {
+        const r = base[k];
+        if (!r || typeof r !== "object") return;
+        baseOut[k] = {
+          positiveCount: num(r.positiveCount),
+          negativeCount: num(r.negativeCount),
+          lastUsedAt: num(r.lastUsedAt),
+          favorite: !!r.favorite
+        };
+      });
+      try {
+        localStorage.setItem(STATS_KEY, JSON.stringify({ version: STATS_VERSION, tags: baseOut, updatedAt: Date.now() }));
+      } catch (e) { /* 配額不足不影響生圖 */ }
+      // 刻意不壓縮 evt：保留所有事件，重建永遠是 base + 全部 evt + fav。
+      // 這樣「掃描後又有新事件」與「兩分頁同時壓縮」都不可能發生，
+      // 也不會因為過期 base 覆寫而永久遺失計數。
+    }
+    return true;
+  }
+
+  /** 成功生成呼叫一次；jobId 必須是該任務唯一值（app.js 用 fileTag UUID）。 */
+  function recordGeneration(o) {
+    o = o || {};
+    const id = String(o.jobId || (Date.now() + "-" + Math.random().toString(36).slice(2)));
+    const key = EVT_PREFIX + id;
+    const uniq = arr => {
+      const out = [], seen = Object.create(null);
+      (Array.isArray(arr) ? arr : []).forEach(raw => {
+        const c = canonicalTag(raw);
+        if (!c || seen[c]) return;
+        seen[c] = true;
+        out.push(c);
+      });
+      return out;
+    };
+    try {
+      if (localStorage.getItem(key) !== null) return false;   // 同一任務不重複計
+      localStorage.setItem(key, JSON.stringify({
+        v: 1, at: num(o.at) || Date.now(), pos: uniq(o.pos), neg: uniq(o.neg)
+      }));
+    } catch (e) { return false; }
+    rebuildStats(true);
+    return true;
+  }
+
+  /** 收藏由使用者主動觸發；只寫所屬標籤的 key，不碰別的標籤。 */
+  function toggleFavorite(raw, force) {
+    const c = canonicalTag(raw);
+    if (!c) return null;
+    const key = FAV_PREFIX + encodeURIComponent(c);
+    let cur = null;
+    try { cur = safeParse(localStorage.getItem(key)); } catch (e) { /* ignore */ }
+    const next = typeof force === "boolean" ? force : !(cur && cur.favorite === true);
+    try { localStorage.setItem(key, JSON.stringify({ tag: c, favorite: next, at: Date.now() })); }
+    catch (e) { return null; }
+    rebuildStats(true);
+    renderAll(true);   // 立刻反映星號 gold 狀態與「我的收藏」計數
+    return next;
+  }
+  function isFavorite(raw) {
+    const c = canonicalTag(raw);
+    return !!(c && stats.tags[c] && stats.tags[c].favorite);
+  }
+  function statsSnapshot() { return JSON.parse(JSON.stringify(stats)); }
+  function statsSignature() { return JSON.stringify(stats.tags); }
+
+  const state = { sel: [], saved: [], cat: "常用", q: "", adult: false, showEn: false, moreCats: false, sortMode: "auto", learned: { general: [], positive: [], negative: [] } };
   try {
     state.sel = JSON.parse(localStorage.getItem("sel") || "[]");
     state.saved = JSON.parse(localStorage.getItem("combos") || "[]");
     state.adult = localStorage.getItem("adult") === "1";
     state.showEn = localStorage.getItem("showEn") === "1";
+    state.moreCats = localStorage.getItem("ui.moreCats") === "1";
+    state.sortMode = localStorage.getItem("ui.selSortMode") === "manual" ? "manual" : "auto";
     const _rawLearned = JSON.parse(localStorage.getItem("ui.learnedTags") || "null");
     if (Array.isArray(_rawLearned)) {
       state.learned = { general: _rawLearned, positive: [], negative: [] };
@@ -76,6 +297,8 @@
       localStorage.setItem("combos", JSON.stringify(state.saved));
       localStorage.setItem("adult", state.adult ? "1" : "0");
       localStorage.setItem("showEn", state.showEn ? "1" : "0");
+      localStorage.setItem("ui.moreCats", state.moreCats ? "1" : "0");
+      localStorage.setItem("ui.selSortMode", state.sortMode);
       localStorage.setItem("ui.learnedTags", JSON.stringify(state.learned || { general:[], positive:[], negative:[] }));
     } catch (e) { /* 無痕模式 */ }
   }
@@ -95,18 +318,33 @@
   function renderCats() {
     const counts = {};
     L.forEach(x => { counts[x.c] = (counts[x.c] || 0) + 1; });
+    // 個人分類是 virtual：不進 CATS、不進 L，只從統計物化快照計數
+    let favN = 0, usedN = 0;
+    Object.keys(stats.tags).forEach(k => {
+      const r = stats.tags[k];
+      if (!r || !CANON_ONLY[k]) return;
+      if (r.favorite) favN++;
+      if (r.positiveCount + r.negativeCount > 0) usedN++;
+    });
+    counts["__fav__"] = favN;
+    counts["__top__"] = usedN;
+    const personal = ["__fav__"];
+    if (usedN > 0) personal.push("__top__");
     // 成人分類在 18+ 開啟時直接顯示為主要分類，不再收合
     const isSecondary = (c) => /^已學習·/.test(c);
-    const primary = CATS.map(([c]) => c).filter(c => !isSecondary(c) && (!/^成人[·向]/.test(c) || state.adult));
+    const primary = personal.concat(CATS.map(([c]) => c).filter(c => !isSecondary(c) && (!/^成人[·向]/.test(c) || state.adult)));
     const secondary = CATS.map(([c]) => c).filter(c => isSecondary(c) && (!/^成人[·向]/.test(c) || state.adult));
     const renderBtn = (c) => {
       const on = !state.q && c === state.cat;
-      const icon = ICONS[c]
-        ? `<img src="/assets/cat-${ICONS[c]}.webp" alt="" onerror="this.replaceWith(window.Tags._initial('${esc(c)}'))">`
-        : '';
-      const initial = ICONS[c] ? '' : `<span class="cat-initial">${esc((c === "成人向" || c.startsWith("成人·")) ? "成" : (c.startsWith("已學習·") ? "學" : c[0]))}</span>`;
+      const virt = c === "__fav__" || c === "__top__";
+      const icon = virt
+        ? `<span class="cat-vicon"><svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.5l6.1-.9L12 3Z"/></svg></span>`
+        : (ICONS[c]
+          ? `<img src="/assets/cat-${ICONS[c]}.webp" alt="" onerror="this.replaceWith(window.Tags._initial('${esc(c)}'))">`
+          : '');
+      const initial = (virt || ICONS[c]) ? '' : `<span class="cat-initial">${esc((c === "成人向" || c.startsWith("成人·")) ? "成" : (c.startsWith("已學習·") ? "學" : c[0]))}</span>`;
       return `<button type="button" class="cat${on ? " on" : ""}" data-c="${esc(c)}" role="tab" aria-selected="${on}">
-        ${icon}${initial}<span>${esc(c)}</span><b>${counts[c] || 0}</b></button>`;
+        ${icon}${initial}<span>${esc(c === "__fav__" ? "我的收藏" : c === "__top__" ? "我的常用" : c)}</span><b>${counts[c] || 0}</b></button>`;
     };
     let html = primary.map(renderBtn).join("");
     if (secondary.length) {
@@ -145,6 +383,13 @@
     const kind = e => hasTC ? window.TagCategories.of(e) : "";
 
     items.forEach(x => {
+      if (x.c === "__fav__" || x.c === "__top__") {
+        return add("personal:" + x.c, x, {
+          title: x.c === "__fav__" ? "我的收藏" : "我的常用",
+          icon: GROUP_ICONS.star,
+          order: x.c === "__fav__" ? 5 : 6
+        });
+      }
       if (isAdultCat(x.c)) {
         // 選「成人向」是全部；選「成人·XX」時標題跟著子分類，讓切換看得見差異
         const title = isAdultCat(state.cat) && state.cat !== "成人向" ? state.cat : "成人內容";
@@ -172,6 +417,11 @@
   /* ── 標籤格 ─────────────────────────────────────────────── */
   function renderTags() {
     const k = state.q.toLowerCase();
+    const personal = !k && (state.cat === "__fav__" || state.cat === "__top__");
+    const usage = x => {
+      const r = stats.tags[canonicalTag(x.e)];
+      return r ? r.positiveCount + r.negativeCount : 0;
+    };
     const items = L.filter(x => {
       // 18+ 關閉：成人標籤完全不出現（存取限制不變）
       if (!state.adult && isAdultCat(x.c)) return false;
@@ -183,42 +433,113 @@
         if (state.cat === "成人向") return true;
         return isAdultCat(state.cat) && x.c === state.cat;
       }
+      if (state.cat === "__fav__") {
+        const r = stats.tags[canonicalTag(x.e)];
+        return !!(r && r.favorite);
+      }
+      if (state.cat === "__top__") return usage(x) > 0;
       return x.c === state.cat;
     });
+    let view = items;
+    if (!k && state.cat === "__top__") {
+      view = items.slice().sort((a, b) => usage(b) - usage(a) || a.e.localeCompare(b.e)).slice(0, 20);
+    }
+    if (personal) view = view.map(x => Object.assign({}, x, { c: state.cat }));
     const on = new Set(state.sel.map(s => s.t));
 
-    if (!items.length) {
-      els.tags.innerHTML = `<div class="tag-empty">找不到「${esc(state.q)}」。<br>可以在下面的補充描述直接打中文，或自己寫英文標籤。</div>`;
+    if (!view.length) {
+      const msg = state.cat === "__fav__" ? "還沒有收藏標籤。<br>在標籤上點一下 ★ 就能收藏。"
+        : state.cat === "__top__" ? "還沒有使用記錄。<br>先生成幾張圖，這裡會出現常用標籤。"
+        : `找不到「${esc(state.q)}」。<br>可以在下面的補充描述直接打中文，或自己寫英文標籤。`;
+      els.tags.innerHTML = `<div class="tag-empty">${msg}</div>`;
       return;
     }
 
-    els.tags.innerHTML = groupItems(items).map(g => `
+    els.tags.innerHTML = groupItems(view).map(g => `
       <section class="tag-group${g.adult ? " adult" : ""}">
         <div class="tag-group-head">
           <span class="tag-group-icon">${g.icon}</span>
           <h3 class="tag-group-title">${esc(g.title)}</h3>
+          <span class="tag-group-count">${g.items.length}</span>
           ${g.badge ? `<span class="tag-group-badge">${g.badge}</span>` : ""}
           ${g.hint ? `<span class="prompt-hint">「${esc(g.hint)}」</span>` : ""}
           ${g.action ? `<button type="button" class="tag-group-action" data-grp-act="quick">${GROUP_ICONS.bolt}快速選擇</button>` : ""}
         </div>
-        <div class="tag-group-items">${g.items.map(x =>
-          `<button type="button" class="tag${on.has(x.e) ? " on" : ""}${/^成人[·向]/.test(x.c) ? " adult" : ""}" data-e="${esc(x.e)}" aria-pressed="${on.has(x.e)}" title="${esc(x.z)} · ${esc(x.e)}">
-            ${esc(x.z)}<i>${esc(x.e)}</i>
-          </button>`
-        ).join("")}</div>
+        <div class="tag-group-items">${g.items.map(x => {
+          const fav = isFavorite(x.e);
+          const n = !k && state.cat === "__top__" ? usage(x) : 0;
+          return `<button type="button" class="tag${on.has(x.e) ? " on" : ""}${/^成人[·向]/.test(x.c) ? " adult" : ""}" data-e="${esc(x.e)}" aria-pressed="${on.has(x.e)}" title="${esc(x.z)} · ${esc(x.e)}${n ? " · 使用 " + n + " 次" : ""}（點 ★ ${fav ? "取消收藏" : "收藏"}）">
+            <span class="tag-fav${fav ? " on" : ""}" data-fav="${esc(x.e)}">★</span>
+            <span class="tag-zh">${esc(x.z)}</span><i>${esc(x.e)}</i>
+          </button>`;
+        }).join("")}</div>
       </section>`
     ).join("");
 
     els.tags.scrollTop = scrollSeed;
   }
 
+  /* ── 已選標籤排序 ─────────────────────────────────────────
+     查找表直接由既有 CATS 推導，不另建一份分類資料。
+     同一標籤出現在多個分類時取最前面（最小 order），成人／學習分類排在最後；
+     找不到的標籤放最後。排序以原始索引作第二鍵，保證穩定。 */
+  function tagOrderMap() {
+    const m = new Map();
+    CATS.forEach(([c, s], ci) => {
+      const tail = /^成人[·向]/.test(c) || /^已學習·/.test(c);
+      const order = tail ? 100 + ci : ci;
+      s.split("|").forEach(p => {
+        // p = "english tag:中文名稱"；部分標籤用 a/b 表示同義詞，拆開一起登錄
+        tagAlts(p.split(":")[0]).forEach(k => {
+          if (!m.has(k) || order < m.get(k)) m.set(k, order);
+        });
+      });
+    });
+    return m;
+  }
+
+  function sortSel(list) {
+    const orders = tagOrderMap();
+    const rank = t => {
+      let best = 1e6;
+      tagAlts(t).forEach(k => {
+        const v = orders.get(k);
+        if (v !== undefined && v < best) best = v;
+      });
+      return best;
+    };
+    return list.map((s, i) => ({ s, i }))
+      .sort((a, b) => rank(a.s.t) - rank(b.s.t) || a.i - b.i)
+      .map(x => x.s);
+  }
+
+  let sortFbTimer = 0;
+  function sortFeedback(text) {
+    const el = $("sortMode");
+    if (!el) return;
+    el.textContent = text;
+    clearTimeout(sortFbTimer);
+    sortFbTimer = setTimeout(() => {
+      const n = $("sortMode");
+      if (n) n.textContent = state.sortMode === "manual" ? "手動排序 · 恢復自動" : "自動排序";
+    }, 1400);
+  }
+
+  function restoreAutoSort() {
+    if (state.sortMode === "auto") return;
+    state.sortMode = "auto";
+    state.sel = sortSel(state.sel);
+    commit();
+    sortFeedback("已恢復自動排序");
+  }
+
   /* ── 已選標籤（底列）───────────────────────────────────── */
   function renderSel() {
     els.selBar.innerHTML = state.sel.length
       ? state.sel.map((s, i) =>
-        `<div class="pill" draggable="true" data-i="${i}" title="${esc(s.t)}">
+        `<div class="pill${s.w !== 1 ? " weighted" : ""}" draggable="true" data-i="${i}" title="${esc(s.t)}">
           <span class="pill-t">${esc(Z[s.t] || s.t)}</span>
-          ${s.w !== 1 ? `<span class="pill-w">×${s.w.toFixed(1)}</span>` : ""}
+          <span class="pill-w">×${s.w.toFixed(1)}</span>
           <button type="button" data-a="m" aria-label="減弱 ${esc(Z[s.t] || s.t)}">−</button>
           <button type="button" data-a="p" aria-label="加強 ${esc(Z[s.t] || s.t)}">＋</button>
           <button type="button" data-a="d" aria-label="移除 ${esc(Z[s.t] || s.t)}">×</button>
@@ -226,9 +547,17 @@
       ).join("")
       : `<span class="sel-empty">還沒選標籤 — 從左邊點一個開始</span>`;
 
-    els.selCount.textContent = state.sel.length
-      ? `${state.sel.length} 個標籤`
-      : "還沒選標籤";
+    els.selCount.className = "sel-count" + (state.sel.length ? " has-tags" : "");
+    els.selCount.innerHTML = state.sel.length
+      ? `<b class="sel-num">${state.sel.length}</b><span class="sel-label">個標籤</span>`
+      : `<span class="sel-label">還沒選標籤</span>`;
+
+    // 模式提示：自動是純資訊；手動時同一位置變成「恢復自動排序」入口
+    if (els.sortModeWrap) {
+      els.sortModeWrap.innerHTML = state.sortMode === "manual"
+        ? `<button type="button" id="sortMode" class="sort-mode manual" data-act="autoSort" title="恢復自動排序">手動排序 · 恢復自動</button>`
+        : `<span id="sortMode" class="sort-mode" role="status">自動排序</span>`;
+    }
   }
 
   // 重繪會把所有按鈕換掉；記下目前焦點，重繪後放回同一顆，鍵盤操作才不會每按一次就掉焦點
@@ -250,6 +579,15 @@
     if (n) { try { n.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
   }
 
+  // 搜尋中的可辨識狀態：輸入框高亮 + 工具列的「搜尋中」膠囊（可按它清除）
+  function syncSearchState() {
+    const active = !!state.q;
+    const wrap = els.search && els.search.closest(".search");
+    if (wrap) wrap.classList.toggle("active", active);
+    if (els.searchState) els.searchState.hidden = !active;
+    if (els.searchTerm) els.searchTerm.textContent = state.q;
+  }
+
   function renderAll(keepScroll) {
     const fk = focusKey();
     if (keepScroll && els.tags) scrollSeed = els.tags.scrollTop;
@@ -261,6 +599,9 @@
   }
 
   function commit() {
+    // 自動模式下所有改變（點選、加減、移除、反推加入、隨機）都走同一套排序；
+    // 手動模式保留使用者順序，新增只會由 addTags 追加到尾端。
+    if (state.sortMode === "auto") state.sel = sortSel(state.sel);
     save();
     renderAll(true);
     try {
@@ -403,10 +744,21 @@
 
   function syncFromStorage() {
     let changed = false;
+    // 統計是唯讀重建：不寫回（破損資料的備份除外），避免同步寫入迴圈
+    const statsBefore = statsSignature();
+    rebuildStats(false);
+    if (statsSignature() !== statsBefore) changed = true;
+    // 先讀模式：要不要整理讀入順序取決於它，必須在比較 sel 之前決定
+    const mode = localStorage.getItem("ui.selSortMode") === "manual" ? "manual" : "auto";
+    if (state.sortMode !== mode) { state.sortMode = mode; changed = true; }
     let storedSel = [];
     try {
       const v = JSON.parse(localStorage.getItem("sel") || "[]");
-      if (Array.isArray(v)) storedSel = v;
+      if (Array.isArray(v)) {
+        // 自動模式：把舊版／他頁可能亂序的 sel 正規化後才比較、採用；
+        // 手動模式：來源順序就是使用者指定的順序，原樣保留。
+        storedSel = mode === "auto" ? sortSel(v) : v;
+      }
     } catch (e) { /* 壞資料保留現有 state */ }
     if (JSON.stringify(storedSel) !== JSON.stringify(state.sel)) {
       state.sel = storedSel;
@@ -432,7 +784,7 @@
     if (els.tags) els.tags.classList.toggle("show-en", state.showEn);
     const btnAdult = $("btnAdult");
     if (btnAdult) {
-      btnAdult.className = "mini-toggle" + (state.adult ? " on" : "");
+      btnAdult.className = "tool-btn" + (state.adult ? " on" : "");
       btnAdult.setAttribute("aria-pressed", String(state.adult));
     }
     ensureLearnedCategory();
@@ -446,7 +798,10 @@
       els.tags = $("tags");
       els.selBar = $("selBar");
       els.selCount = $("selCount");
+      els.sortModeWrap = $("sortModeWrap");
       els.search = $("search");
+      els.searchState = $("searchState");
+      els.searchTerm = $("searchTerm");
 
       // 分類導航左右鍵：只捲動 #cats，不改任何分類狀態或資料
       syncCatArrows = () => {
@@ -476,16 +831,16 @@
       }, { passive: false });
       window.addEventListener("resize", syncCatArrows);
 
-      // 在搜尋框旁動態加 18+ 開關，避免 index.html 塞太多東西
-      const top = document.querySelector(".lib-top");
+      // 18+ 開關仍由本檔建立（存取邏輯不變），但放進工具列與 EN／隨機成組
+      const tools = $("libTools") || document.querySelector(".lib-top");
       const btnAdult = document.createElement("button");
       btnAdult.type = "button";
       btnAdult.id = "btnAdult";
-      btnAdult.className = "mini-toggle" + (state.adult ? " on" : "");
+      btnAdult.className = "tool-btn" + (state.adult ? " on" : "");
       btnAdult.textContent = "18+";
       btnAdult.setAttribute("aria-pressed", String(state.adult));
       btnAdult.title = "顯示成人向標籤";
-      top.appendChild(btnAdult);
+      tools.insertBefore(btnAdult, $("btnRandom") || null);
 
       const btnEn = $("btnEn");
       btnEn.classList.toggle("on", state.showEn);
@@ -510,10 +865,27 @@
         save();
       };
 
+      // 排序模式入口用事件委派，renderSel 重繪後不必重新綁定
+      if (els.sortModeWrap) els.sortModeWrap.onclick = e => {
+        if (e.target.closest("[data-act='autoSort']")) restoreAutoSort();
+      };
+
+      // 「搜尋中」膠囊本身就是清除搜尋的入口
+      if (els.searchState) els.searchState.onclick = () => {
+        state.q = "";
+        els.search.value = "";
+        scrollSeed = 0;
+        syncSearchState();
+        renderCats();
+        renderTags();
+        els.search.focus();
+      };
+
       els.cats.onclick = e => {
         const more = e.target.closest("[data-act='moreCats']");
         if (more) {
           state.moreCats = !state.moreCats;
+          save();
           renderAll();
           return;
         }
@@ -523,10 +895,19 @@
         state.q = "";
         els.search.value = "";
         scrollSeed = 0;
+        syncSearchState();
         renderAll();
       };
 
       els.tags.onclick = e => {
+        // 收藏優先：點星星只改收藏，绝不連動標籤選取
+        const fav = e.target.closest(".tag-fav");
+        if (fav) {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleFavorite(fav.dataset.fav);
+          return;
+        }
         // 分組標題的「快速選擇」沿用既有隨機配一組邏輯
         const act = e.target.closest("[data-grp-act]");
         if (act) {
@@ -545,6 +926,7 @@
       els.search.oninput = e => {
         state.q = e.target.value.trim();
         scrollSeed = 0;
+        syncSearchState();
         renderCats();
         renderTags();
       };
@@ -575,31 +957,44 @@
       };
 
       let dragFrom = -1;
+      const clearDrag = () => {
+        dragFrom = -1;
+        if (!els.selBar) return;
+        [...els.selBar.querySelectorAll(".pill.dragging")].forEach(p => p.classList.remove("dragging"));
+      };
       els.selBar.ondragstart = e => {
         const c = e.target.closest(".pill");
         if (!c) return;
         dragFrom = +c.dataset.i;
         c.classList.add("dragging");
         e.dataTransfer.setData("text/plain", "x");
+        e.dataTransfer.effectAllowed = "move";
       };
-      els.selBar.ondragend = e => {
-        const c = e.target.closest(".pill");
-        if (c) c.classList.remove("dragging");
-      };
+      // 放手、按 Esc 取消、拖到外面都會觸發 dragend，統一清理狀態
+      els.selBar.ondragend = clearDrag;
       els.selBar.ondragover = e => { e.preventDefault(); };
       els.selBar.ondrop = e => {
         e.preventDefault();
         const c = e.target.closest(".pill");
-        if (!c || dragFrom < 0) return;
+        if (!c || dragFrom < 0) { clearDrag(); return; }
         const to = +c.dataset.i;
+        if (to === dragFrom) { clearDrag(); return; }   // 拖到自己：順序不變，也不切模式
+        const before = state.sel.map(s => s.t).join("\u0000");
         const [m] = state.sel.splice(dragFrom, 1);
-        state.sel.splice(to, 0, m);
-        dragFrom = -1;
+        // 插入點以「放到目標之前」為準；從前往後拖時移除會讓目標索引左移一格
+        state.sel.splice(dragFrom < to ? to - 1 : to, 0, m);
+        clearDrag();
+        if (state.sel.map(s => s.t).join("\u0000") === before) return;
+        state.sortMode = "manual";   // 只有真正完成排序才切換
         commit();
       };
 
+      rebuildStats(false);   // 統計只讀重建；開頁不寫回任何統計 key
       ensureLearnedCategory();
+      // 舊資料／換頁還原：自動模式下先整理成分類順序；手動模式原樣保留
+      if (state.sortMode === "auto") state.sel = sortSel(state.sel);
       renderAll();
+      syncSearchState();
     },
 
     /** 送進模型的提示詞（不含品質標籤，品質由 app.js 加） */
@@ -613,12 +1008,25 @@
     /** 跨分頁 / 生成前同步：只讀 localStorage 更新狀態與 UI，不寫回 */
     syncFromStorage,
 
+    /* ── Phase 1 個人統計 API（供 app.js 與測試使用）──────── */
+    canonicalTag,
+    recordGeneration,
+    toggleFavorite,
+    isFavorite,
+    statsSnapshot,
+    syncStatsFromStorage() { rebuildStats(false); return true; },
+    statsKeys() { return { main: STATS_KEY, evt: EVT_PREFIX, fav: FAV_PREFIX, broken: BROKEN_PREFIX, version: STATS_VERSION }; },
+
     selected() { return state.sel; },
     snapshot() { return JSON.parse(JSON.stringify(state.sel)); },
 
     restore(sel) {
       state.sel = JSON.parse(JSON.stringify(sel || []));
+      // 歷史快照是需要重現的明確順序：保留原樣並切到手動，
+      // 之後新增標籤只會往尾端加，不會被自動排序改寫。
+      state.sortMode = "manual";
       commit();
+      sortFeedback("已還原原本順序");
     },
 
     /** 增量加入標籤：不清空、不替換既有選取。回傳實際加入的數量。 */
@@ -765,6 +1173,8 @@
         seen.add(k);
         return true;
       }).map(t => ({ t, w: 1 }));
+      // 隨機是整組重選，沿用自動分類排序（即使原本是手動模式）
+      state.sortMode = "auto";
       commit();
       return state.adult ? "隨機組合（18+）" : "隨機組合";
     },

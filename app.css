@@ -202,6 +202,9 @@ h1, h2, h3, p { margin: 0; }
   white-space: nowrap;
 }
 .btn:hover { background: var(--surface-3); border-color: var(--border-2); }
+.btn:disabled:not(.btn-primary), .btn:disabled:not(.btn-primary):hover {
+  opacity: .42; cursor: not-allowed; transform: none; filter: none;
+}
 .btn:active { transform: translateY(1px); }
 .btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 
@@ -254,42 +257,93 @@ h1, h2, h3, p { margin: 0; }
 .btn-primary svg { width: 18px; height: 18px; }
 
 /* ── 6. 左：標籤庫 ───────────────────────────────────────── */
-/* 固定：搜尋列 + 分類導航；捲動：標籤內容；固定：提示詞／動作 */
-.lib-top { display: flex; gap: 8px; padding: 12px 12px 8px; flex: 0 0 auto; }
+/* 固定：搜尋列 + 工具列 + 分類導航；捲動：標籤內容；固定：提示詞／動作 */
+.lib-top {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 12px 8px; flex: 0 0 auto;
+}
 
-.search { position: relative; flex: 1; min-width: 0; }
-.search svg {
-  position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
-  width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 1.75;
+/* 搜尋是唯一的主要入口：最大、最亮，搜尋中另有明顯狀態 */
+.search { position: relative; flex: none; }
+.search > svg {
+  position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+  width: 17px; height: 17px; fill: none; stroke: var(--muted); stroke-width: 1.75;
   stroke-linecap: round; pointer-events: none;
+  transition: stroke var(--dur);
 }
 .search input {
-  width: 100%; height: 38px;
-  padding: 0 12px 0 34px;
+  width: 100%; height: 42px;
+  padding: 0 14px 0 38px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  color: var(--text);
+  font: 14px/1 var(--font);
+  transition: border-color var(--dur), background var(--dur), box-shadow var(--dur);
+}
+.search input::placeholder { color: var(--muted-2); }
+.search input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface-2);
+  box-shadow: 0 0 0 3px var(--accent-weak);
+}
+.search.active input { border-color: var(--accent-line); background: var(--surface-2); }
+.search.active > svg { stroke: var(--accent-2); }
+
+/* 次要操作成組：EN / 18+ / 隨機（18+ 由 tags.js 插入，維持既有存取邏輯） */
+.lib-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.search-state {
+  flex: 1; min-width: 0;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px;
+  background: var(--accent-weak);
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  color: var(--text-2);
+  font: 500 var(--fs-xs)/1 var(--font);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur), color var(--dur);
+}
+.search-state::before {
+  content: ""; flex: none; width: 6px; height: 6px;
+  border-radius: 50%; background: var(--accent-2);
+}
+.search-state b {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #cfc7ff; font-weight: 600;
+}
+.search-state:hover { background: rgba(139, 124, 255, .22); color: var(--text); }
+
+.tool-group {
+  flex: none; margin-left: auto;
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px;
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: 9px;
-  color: var(--text);
-  font: 13px/1 var(--font);
-  transition: border-color var(--dur), background var(--dur);
 }
-.search input::placeholder { color: var(--muted-2); }
-.search input:focus { outline: none; border-color: var(--accent-line); background: var(--surface-2); }
-
-.mini-toggle {
-  width: 42px; height: 38px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 9px;
+.tool-btn {
+  min-width: 34px; height: 26px;
+  display: inline-grid; place-items: center;
+  padding: 0 8px;
+  background: transparent; border: 0; border-radius: 7px;
   color: var(--muted);
-  font: 600 11px/1 var(--font);
-  letter-spacing: .5px;
+  font: 600 var(--fs-xs)/1 var(--font);
+  letter-spacing: .4px;
   cursor: pointer;
-  transition: background var(--dur), border-color var(--dur), color var(--dur);
+  transition: background var(--dur), color var(--dur);
 }
-.mini-toggle:hover { color: var(--text); border-color: var(--border-2); }
-.mini-toggle.on {
-  background: var(--accent-weak); border-color: var(--accent); color: #cfc7ff;
+.tool-btn:hover { background: var(--surface-3); color: var(--text); }
+.tool-btn.on {
+  background: var(--accent-weak); color: #cfc7ff;
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+.tool-icon { width: 28px; padding: 0; }
+.tool-icon svg {
+  width: 15px; height: 15px; fill: none;
+  stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round;
 }
 
 /* 分類導航：單排橫向，空間不足水平捲動；捲軸隱藏避免遮擋 */
@@ -317,9 +371,9 @@ h1, h2, h3, p { margin: 0; }
   flex: 1; min-width: 0;
   display: grid;
   grid-auto-flow: column;
-  grid-template-rows: repeat(2, 38px);
+  grid-template-rows: repeat(2, 36px);
   grid-auto-columns: max-content;
-  gap: 6px;
+  gap: 5px;
   overflow-x: auto; overflow-y: hidden;
   padding: 3px 0;
   scrollbar-width: none;
@@ -328,42 +382,48 @@ h1, h2, h3, p { margin: 0; }
 .cat {
   position: relative; flex: 0 0 auto;
   display: inline-flex; align-items: center; gap: 6px;
-  height: 38px; padding: 0 11px 0 6px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 9px;
+  height: 36px; padding: 0 10px 0 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
   color: var(--muted);
   font: 500 var(--fs-sm)/1 var(--font);
-  white-space: nowrap;
+  white-space: nowrap;   /* 名稱不截斷，靠水平捲動瀏覽 */
   cursor: pointer;
   transition: background var(--dur), border-color var(--dur), color var(--dur);
 }
-.cat:hover { background: var(--surface-3); color: var(--text); }
+.cat:hover { background: var(--surface-2); color: var(--text); }
 .cat img, .cat .cat-initial {
-  width: 22px; height: 22px; border-radius: 6px; object-fit: contain;
+  width: 20px; height: 20px; border-radius: 6px; object-fit: contain;
 }
 .cat .cat-initial {
   display: grid; place-items: center;
   background: var(--surface-3);
-  font-size: 11px; color: var(--text-2);
+  font-size: 11px; color: var(--muted);
 }
 .cat.on {
   background: var(--accent-weak);
   border-color: var(--accent);
-  color: #dcd6ff;
+  color: #e4dfff;
+  font-weight: 600;
 }
+.cat.on::before {
+  content: ""; position: absolute; left: -1px; top: 9px; bottom: 9px; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--accent-2);
+}
+/* 數量是次要資訊：改成行內淡色數字，不再用浮起的徽章搶注意力 */
 .cat b {
-  position: absolute; top: -5px; right: -4px;
-  min-width: 18px; height: 18px; padding: 0 5px;
-  display: grid; place-items: center;
-  background: var(--surface-3);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--muted);
-  font: 600 var(--fs-xs)/1 var(--font);
+  flex: none; padding: 0;
+  background: none; border: 0; border-radius: 0;
+  color: var(--muted-2);
+  font: 400 var(--fs-xs)/1 var(--font);
+  font-variant-numeric: tabular-nums;
 }
-.cat.on b { background: var(--accent-solid); border-color: var(--accent-solid); color: #fff; }
-.cat-more { background: var(--surface-3); color: var(--text-2); }
+.cat.on b { color: #cfc7ff; }
+.cat-more { background: var(--surface-2); border-color: var(--border); color: var(--text-2); }
+.cat-more:hover { background: var(--surface-3); }
+.cat-vicon { width: 20px; height: 20px; display: grid; place-items: center; color: var(--accent); flex: none; }
+.cat-vicon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linejoin: round; }
 .cats-more { display: contents; }   /* 讓次分類直接加入兩列網格 */
 
 /* 標籤內容：分組；只有這一層垂直捲動 */
@@ -380,12 +440,16 @@ h1, h2, h3, p { margin: 0; }
   padding-top: 12px;
 }
 .tag-group-head { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
-.tag-group-icon { width: 17px; height: 17px; display: grid; place-items: center; color: var(--accent); }
+.tag-group-icon { width: 17px; height: 17px; display: grid; place-items: center; color: var(--accent); flex: none; }
 .tag-group-icon svg {
   width: 17px; height: 17px; fill: none;
   stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round;
 }
 .tag-group-title { font: 600 13px/1.2 var(--font); color: var(--text); }
+.tag-group-count {
+  color: var(--muted-2); font: 400 var(--fs-xs)/1 var(--font);
+  font-variant-numeric: tabular-nums;
+}
 .tag-group-badge {
   padding: 2px 6px; border-radius: 999px;
   background: rgba(248, 113, 113, .16);
@@ -396,51 +460,72 @@ h1, h2, h3, p { margin: 0; }
 .tag-group-action {
   margin-left: auto;
   display: inline-flex; align-items: center; gap: 4px;
-  padding: 0; background: none; border: 0;
-  color: var(--accent-2);
-  font: 500 11px/1 var(--font);
+  min-height: 26px; padding: 0 9px;
+  background: var(--accent-weak);
+  border: 1px solid var(--accent-line);
+  border-radius: 7px;
+  color: #cfc7ff;
+  font: 500 var(--fs-xs)/1 var(--font);
+  cursor: pointer;
+  transition: background var(--dur), color var(--dur);
 }
-.tag-group-action:hover { color: #fff; }
+.tag-group-action:hover { background: rgba(139, 124, 255, .24); color: #fff; }
 .tag-group-action svg {
   width: 12px; height: 12px; fill: none;
   stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round;
 }
 .tag-group-items { display: flex; flex-wrap: wrap; gap: 6px; }
 
+/* 未選取：低視覺重量；選取：實底 + 勾，一眼可辨；不靠 hover 展開英文 */
 .tag {
   display: inline-flex; align-items: center; gap: 5px;
-  padding: 6px 12px;
-  background: var(--surface-2);
+  max-width: 100%; min-height: 30px;
+  padding: 5px 11px;
+  background: transparent;
   border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-2);
-  font: 500 12px/1 var(--font);
-  white-space: nowrap;
+  border-radius: 8px;
+  color: var(--muted);
+  font: 500 12px/1.35 var(--font);
   cursor: pointer;
   transition: background var(--dur), border-color var(--dur), color var(--dur);
 }
-.tag:hover { background: var(--surface-3); border-color: var(--border-2); color: var(--text); }
-/* 英文不要用 hover 展開（會撐寬標籤→換行→閃爍），只在按 EN 時靜態顯示 */
-.tag i { display: none; font-style: normal; font-size: var(--fs-xs); color: var(--muted-2); white-space: nowrap; }
-.tags.show-en .tag i { display: inline; color: var(--muted); }
+.tag:hover { background: var(--surface-2); border-color: var(--border-2); color: var(--text); }
+/* 收藏星號：寬度永遠保留，hover 只改透明度 → chip 尺寸與排列不因 hover 改變 */
+.tag-fav {
+  flex: none; width: 11px; min-width: 11px;
+  color: var(--muted-2); font-size: 11px; line-height: 1;
+  text-align: center; opacity: 0; cursor: pointer;
+  user-select: none;
+  transition: opacity var(--dur), color var(--dur);
+}
+.tag:hover .tag-fav, .tag-fav.on { opacity: 1; }
+.tag-fav.on { color: #f0c674; }
+.tag.on .tag-fav { color: rgba(255, 255, 255, .9); }
+.tag-zh { white-space: nowrap; }
+.tag i {
+  display: none; font-style: normal;
+  font-size: var(--fs-xs); color: var(--muted-2);
+  min-width: 0; max-width: 22ch; overflow-wrap: anywhere;
+}
+/* EN 模式：英文靜態顯示，可換行但不溢出版面 */
+.tags.show-en .tag i { display: inline; color: var(--muted); white-space: normal; }
 .tag.on {
-  background: linear-gradient(135deg, var(--accent-solid), var(--accent-solid-2));
-  border-color: transparent;
+  background: var(--accent-solid);
+  border-color: var(--accent-solid);
   color: #fff;
-  box-shadow: 0 4px 14px -6px rgba(139, 124, 255, .9);
+  font-weight: 600;
 }
-.tag.on i { color: rgba(255, 255, 255, .88); }
-.tag.on::before {
-  content: "✓"; font-size: var(--fs-xs); opacity: .9; margin-right: -1px;
-}
-/* 成人內容：獨立色系， dim 但清楚 */
+.tag.on i { color: rgba(255, 255, 255, .85); }
+.tag.on::before { content: "✓"; font-size: var(--fs-xs); opacity: .95; margin-right: -1px; }
+/* 成人內容維持獨立色系（含選取態），不被一般選取樣式吞掉 */
 .tag-group.adult .tag-group-icon { color: var(--err); }
 .tag-group.adult .tag:not(.on) {
-  background: rgba(122, 52, 68, .26);
-  border-color: rgba(200, 100, 120, .35);
-  color: #f0c4cd;
+  background: rgba(122, 52, 68, .18);
+  border-color: rgba(200, 100, 120, .28);
+  color: #d9a7b2;
 }
-.tag-group.adult .tag:not(.on):hover { background: rgba(150, 60, 80, .38); color: #fff; }
+.tag-group.adult .tag:not(.on):hover { background: rgba(150, 60, 80, .34); color: #fff; }
+.tag-group.adult .tag.on { background: #a12c46; border-color: #a12c46; }
 .tag-empty {
   width: 100%; padding: 18px 6px;
   color: var(--muted); font-size: 12.5px; text-align: center;
@@ -868,14 +953,44 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
   backdrop-filter: blur(10px);
 }
 .selwrap { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
+/* 數量是主資訊：大數字 + 淡標籤，與工具列同屬次要章節但更好認 */
 .sel-count {
   flex: none;
-  font-size: var(--fs-sm); color: var(--muted);
-  padding: 4px 9px;
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 4px 10px;
+  background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 99px;
+  border-radius: 8px;
+  font: 500 var(--fs-sm)/1.2 var(--font);
   white-space: nowrap;
 }
+.sel-count.has-tags { background: var(--accent-weak); border-color: var(--accent-line); }
+.sel-num {
+  color: var(--muted-2);
+  font: 700 15px/1 var(--font);
+  font-variant-numeric: tabular-nums;
+}
+.sel-count.has-tags .sel-num { color: #cfc7ff; }
+.sel-label { color: var(--muted); }
+/* 排序模式：自動是淡資訊，手動時同一位置變成「恢復自動排序」入口 */
+.sort-mode-wrap { flex: none; display: inline-flex; align-items: center; }
+.sort-mode {
+  display: inline-flex; align-items: center;
+  height: 24px; padding: 0 7px;
+  border: 1px solid transparent; border-radius: 6px;
+  background: transparent;
+  color: var(--muted-2);
+  font: 500 var(--fs-xs)/1 var(--font);
+  white-space: nowrap;
+}
+button.sort-mode.manual {
+  border-color: var(--accent-line);
+  background: var(--accent-weak);
+  color: #cfc7ff;
+  cursor: pointer;
+  transition: background var(--dur), color var(--dur);
+}
+button.sort-mode.manual:hover { background: rgba(139, 124, 255, .24); color: #fff; }
 .sel-bar {
   flex: 1; min-width: 0;
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
@@ -888,22 +1003,28 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 
 .pill {
   flex: none;
-  display: inline-flex; align-items: center; gap: 3px;
-  height: 32px; padding: 0 4px 0 11px;
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 30px; padding: 0 4px 0 10px;
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 99px;
-  font: 500 12.5px/1 var(--font);
+  border-radius: 8px;
+  font: 500 12px/1 var(--font);
   color: var(--text-2);
   cursor: grab;
   transition: border-color var(--dur), background var(--dur);
 }
 .pill:hover { background: var(--surface-3); border-color: var(--border-2); }
 .pill.dragging { opacity: .4; }
-.pill-t { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pill-w { font-size: var(--fs-xs); color: var(--accent); font-variant-numeric: tabular-nums; }
+.pill-t { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill-w {
+  padding: 2px 4px; border-radius: 5px;
+  background: rgba(255, 255, 255, .04);
+  color: var(--muted-2);
+  font-size: var(--fs-xs); font-variant-numeric: tabular-nums;
+}
+.pill.weighted .pill-w { background: var(--accent-weak); color: #cfc7ff; }
 .pill button {
-  width: 24px; height: 24px;
+  width: 22px; height: 22px;
   display: grid; place-items: center;
   border: 0; border-radius: 6px;
   background: transparent; color: var(--muted);

@@ -1,0 +1,537 @@
+{
+  "at": "2026-11-22T23:52:43.503Z",
+  "url": "http://127.0.0.1:7860/?v=40",
+  "port": 9777,
+  "passed": 58,
+  "failed": 0,
+  "results": [
+    {
+      "name": "N1 CATS canonical",
+      "ok": true,
+      "detail": "long hair"
+    },
+    {
+      "name": "N2 大小寫＋底線",
+      "ok": true,
+      "detail": "long hair"
+    },
+    {
+      "name": "N3 底線/空格互通",
+      "ok": true,
+      "detail": "one_eye_closed"
+    },
+    {
+      "name": "N4 CATS 明確 / 別名",
+      "ok": true,
+      "detail": "lowleg_panties"
+    },
+    {
+      "name": "N5 CATS 中文標籤",
+      "ok": true,
+      "detail": "long hair"
+    },
+    {
+      "name": "N6 dict 中英對照",
+      "ok": true,
+      "detail": "thighhighs"
+    },
+    {
+      "name": "N7 不存在的標籤回 null",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "N8 自由描述回 null",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "N9 權重括號可解析",
+      "ok": true,
+      "detail": "long hair"
+    },
+    {
+      "name": "N10 學習標籤不能被當成權威",
+      "ok": true,
+      "detail": {
+        "canonical": null,
+        "matchTag": "tag_stats_custom"
+      }
+    },
+    {
+      "name": "N11 CATS 完整複合別名 lowleg",
+      "ok": true,
+      "detail": "lowleg_panties"
+    },
+    {
+      "name": "N12 CATS 完整複合別名 oral/fellatio",
+      "ok": true,
+      "detail": "oral"
+    },
+    {
+      "name": "N13 CATS 完整複合別名 pussy/vaginal",
+      "ok": true,
+      "detail": "pussy"
+    },
+    {
+      "name": "N14 複合別名大小寫＋底線",
+      "ok": true,
+      "detail": "oral"
+    },
+    {
+      "name": "N15 不存在的 foo/bar 仍回 null",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "N16 任意反轉組合不猜測",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "S1 mock 生成成功（無 GPU，2 張圖）",
+      "ok": true,
+      "detail": {
+        "ok": true,
+        "pid": "mock-p1-1795391561238"
+      }
+    },
+    {
+      "name": "S2 一次任務只寫一個 evt key",
+      "ok": true,
+      "detail": [
+        "ui.tagStats.evt.c1c050c5-a43e-402b-b3fb-4a83003b548f"
+      ]
+    },
+    {
+      "name": "S3 正向計數＋同任務去重",
+      "ok": true,
+      "detail": {
+        "long": {
+          "positiveCount": 1,
+          "negativeCount": 1,
+          "lastUsedAt": 1795391561273,
+          "favorite": false
+        },
+        "blue": {
+          "positiveCount": 1,
+          "negativeCount": 0,
+          "lastUsedAt": 1795391561273,
+          "favorite": false
+        }
+      }
+    },
+    {
+      "name": "S4 負向計數（正負分欄）",
+      "ok": true,
+      "detail": {
+        "short": {
+          "positiveCount": 0,
+          "negativeCount": 1,
+          "lastUsedAt": 1795391561273,
+          "favorite": false
+        },
+        "long": {
+          "positiveCount": 1,
+          "negativeCount": 1,
+          "lastUsedAt": 1795391561273,
+          "favorite": false
+        }
+      }
+    },
+    {
+      "name": "S5 lastUsedAt 是 Unix ms",
+      "ok": true,
+      "detail": 1795391561273
+    },
+    {
+      "name": "S6 快照版本欄位",
+      "ok": true,
+      "detail": 1
+    },
+    {
+      "name": "S7 同 jobId 不重複計",
+      "ok": true,
+      "detail": {
+        "before": 2,
+        "after": 2
+      }
+    },
+    {
+      "name": "S8 失敗生成不計數",
+      "ok": true,
+      "detail": {
+        "gf": {
+          "ok": false,
+          "pid": "mock-p1-1795391561682"
+        },
+        "events": 2,
+        "count": 2
+      }
+    },
+    {
+      "name": "S9 複合別名生成成功",
+      "ok": true,
+      "detail": {
+        "ok": true,
+        "pid": "mock-p1-1795391562136"
+      }
+    },
+    {
+      "name": "S10 複合別名正/負向計數",
+      "ok": true,
+      "detail": {
+        "low": {
+          "positiveCount": 1,
+          "negativeCount": 0,
+          "lastUsedAt": 1795391562164,
+          "favorite": false
+        },
+        "oral": {
+          "positiveCount": 1,
+          "negativeCount": 0,
+          "lastUsedAt": 1795391562164,
+          "favorite": false
+        },
+        "pussy": {
+          "positiveCount": 0,
+          "negativeCount": 1,
+          "lastUsedAt": 1795391562164,
+          "favorite": false
+        }
+      }
+    },
+    {
+      "name": "S11 同任務複合別名不重複計",
+      "ok": true,
+      "detail": {
+        "oral": 1,
+        "long": 2
+      }
+    },
+    {
+      "name": "F1 標籤上有收藏入口",
+      "ok": true,
+      "detail": true
+    },
+    {
+      "name": "F2 點星星不改變選取",
+      "ok": true,
+      "detail": {
+        "before": "[{\"t\":\"lowleg_panties/low_leg_panties\",\"w\":1},{\"t\":\"oral/fellatio\",\"w\":1}]",
+        "after": "[{\"t\":\"lowleg_panties/low_leg_panties\",\"w\":1},{\"t\":\"oral/fellatio\",\"w\":1}]"
+      }
+    },
+    {
+      "name": "F3 收藏已保存",
+      "ok": true,
+      "detail": {
+        "positiveCount": 2,
+        "negativeCount": 1,
+        "lastUsedAt": 1795391561682,
+        "favorite": true
+      }
+    },
+    {
+      "name": "F4 收藏狀態可同步",
+      "ok": true,
+      "detail": true
+    },
+    {
+      "name": "F5 再點取消收藏",
+      "ok": true,
+      "detail": {
+        "positiveCount": 2,
+        "negativeCount": 1,
+        "lastUsedAt": 1795391561682,
+        "favorite": false
+      }
+    },
+    {
+      "name": "F6 未使用過的標籤也能收藏",
+      "ok": true,
+      "detail": {
+        "positiveCount": 0,
+        "negativeCount": 0,
+        "lastUsedAt": 0,
+        "favorite": true
+      }
+    },
+    {
+      "name": "F7 複合別名在 UI 可見",
+      "ok": true,
+      "detail": true
+    },
+    {
+      "name": "F8 複合別名可收藏且不誤觸選取",
+      "ok": true,
+      "detail": {
+        "fav": {
+          "positiveCount": 1,
+          "negativeCount": 0,
+          "lastUsedAt": 1795391562164,
+          "favorite": true
+        },
+        "sel": "[{\"t\":\"lowleg_panties/low_leg_panties\",\"w\":1},{\"t\":\"oral/fellatio\",\"w\":1}]"
+      }
+    },
+    {
+      "name": "F8b 收藏後星號立即變色（gold class）",
+      "ok": true,
+      "detail": "tag-fav on"
+    },
+    {
+      "name": "F9 複合別名可取消收藏",
+      "ok": true,
+      "detail": {
+        "positiveCount": 1,
+        "negativeCount": 0,
+        "lastUsedAt": 1795391562164,
+        "favorite": false
+      }
+    },
+    {
+      "name": "U1 我的收藏分類存在",
+      "ok": true,
+      "detail": [
+        "__fav__",
+        "__top__",
+        "常用",
+        "人物",
+        "頭髮",
+        "臉&表情",
+        "服裝",
+        "配件",
+        "動作",
+        "構圖&光影",
+        "場景",
+        "風格",
+        "成人向",
+        "成人·身體服裝",
+        "成人·動作",
+        "成人·R18",
+        null
+      ]
+    },
+    {
+      "name": "U2 收藏分類只顯示已收藏標籤",
+      "ok": true,
+      "detail": [
+        "chibi",
+        "lowleg_panties/low_leg_panties"
+      ]
+    },
+    {
+      "name": "U3 原有搜尋仍可用",
+      "ok": true,
+      "detail": [
+        "plana_(blue_archive)",
+        "blue hair",
+        "blue eyes",
+        "blue_shorts",
+        "blue_leotard"
+      ]
+    },
+    {
+      "name": "U4 複合別名出現在我的收藏",
+      "ok": true,
+      "detail": [
+        "chibi",
+        "lowleg_panties/low_leg_panties"
+      ]
+    },
+    {
+      "name": "X1 同標籤並行更新合計",
+      "ok": true,
+      "detail": {
+        "positiveCount": 2,
+        "negativeCount": 0,
+        "lastUsedAt": 2000,
+        "favorite": false
+      }
+    },
+    {
+      "name": "X2 不同標籤並行更新都保留",
+      "ok": true,
+      "detail": {
+        "blue": {
+          "positiveCount": 1,
+          "negativeCount": 0,
+          "lastUsedAt": 2000,
+          "favorite": false
+        },
+        "short": {
+          "positiveCount": 0,
+          "negativeCount": 1,
+          "lastUsedAt": 2000,
+          "favorite": false
+        }
+      }
+    },
+    {
+      "name": "X3 最近使用時間取最大值",
+      "ok": true,
+      "detail": 2000
+    },
+    {
+      "name": "X4 舊分頁過期快照不會抹掉事件計數",
+      "ok": true,
+      "detail": {
+        "positiveCount": 2,
+        "negativeCount": 0,
+        "lastUsedAt": 2000,
+        "favorite": false
+      }
+    },
+    {
+      "name": "X5 收藏衝突以較新時間為準",
+      "ok": true,
+      "detail": {
+        "positiveCount": 2,
+        "negativeCount": 0,
+        "lastUsedAt": 2000,
+        "favorite": false
+      }
+    },
+    {
+      "name": "X6 storage event 觸發收藏同步",
+      "ok": true,
+      "detail": true
+    },
+    {
+      "name": "X7 超過 300 筆事件不自動刪除",
+      "ok": true,
+      "detail": {
+        "before": 305,
+        "after": 306
+      }
+    },
+    {
+      "name": "X8 大量事件計數完整",
+      "ok": true,
+      "detail": {
+        "positiveCount": 306,
+        "negativeCount": 0,
+        "lastUsedAt": 2000,
+        "favorite": false
+      }
+    },
+    {
+      "name": "X9 掃描後新增事件仍被計入",
+      "ok": true,
+      "detail": {
+        "blue": {
+          "positiveCount": 1,
+          "negativeCount": 0,
+          "lastUsedAt": 3000,
+          "favorite": false
+        },
+        "long": 306
+      }
+    },
+    {
+      "name": "X10 重新載入不重複計數",
+      "ok": true,
+      "detail": {
+        "long": 306,
+        "blue": 1
+      }
+    },
+    {
+      "name": "X11 大量事件後收藏不受影響",
+      "ok": true,
+      "detail": {
+        "positiveCount": 306,
+        "negativeCount": 0,
+        "lastUsedAt": 2000,
+        "favorite": true
+      }
+    },
+    {
+      "name": "X12 多方事件並存不遺失",
+      "ok": true,
+      "detail": {
+        "long": 307,
+        "short": 1,
+        "blue": 2
+      }
+    },
+    {
+      "name": "C1 舊 learnedTags 陣列相容",
+      "ok": true,
+      "detail": "[{\"en\":\"legacy_arr\",\"zh\":\"舊格式\"}]"
+    },
+    {
+      "name": "C2 損壞統計不造成例外",
+      "ok": true,
+      "detail": false
+    },
+    {
+      "name": "C3 損壞資料已備份且功能可用",
+      "ok": true,
+      "detail": [
+        "ui.tagStats.broken.1795391563480"
+      ]
+    },
+    {
+      "name": "C4 未知版本安全降級",
+      "ok": true,
+      "detail": {
+        "threw2": false,
+        "version": 1
+      }
+    },
+    {
+      "name": "C5 統計操作不改動 sel/adult/showEn",
+      "ok": true,
+      "detail": {
+        "now": {
+          "sel": "[{\"t\":\"lowleg_panties/low_leg_panties\",\"w\":1},{\"t\":\"oral/fellatio\",\"w\":1}]",
+          "adult": "1",
+          "showEn": "0"
+        },
+        "stable": {
+          "sel": "[{\"t\":\"lowleg_panties/low_leg_panties\",\"w\":1},{\"t\":\"oral/fellatio\",\"w\":1}]",
+          "adult": "1",
+          "showEn": "0"
+        }
+      }
+    }
+  ],
+  "layout": {
+    "noVerticalScroll": true,
+    "noHorizontalScroll": true,
+    "tagsScrollInternally": false,
+    "catsNoVerticalClip": true,
+    "doc": {
+      "scrollW": 1920,
+      "clientW": 1920,
+      "scrollH": 1080,
+      "clientH": 1080
+    },
+    "tags": {
+      "w": 478,
+      "h": 553,
+      "x": 25,
+      "y": 277,
+      "scrollH": 553,
+      "clientH": 553,
+      "tagCount": 0,
+      "adultClassTags": 0
+    },
+    "cats": {
+      "w": 398,
+      "h": 83,
+      "x": 65,
+      "y": 185,
+      "scrollH": 83,
+      "clientH": 83,
+      "maxHeight": "none",
+      "scrollTop": 0,
+      "overflows": false
+    }
+  },
+  "consoleErrors": [],
+  "pageErrors": [],
+  "failedRequests": []
+}

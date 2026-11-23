@@ -287,7 +287,7 @@
   // ── 跨分頁狀態同步 ─────────────────────────────────────
   // storage event 只通知「其他」分頁；本分頁的按鈕/輸入仍即時更新 state。
   // 下列函式只讀取 localStorage → 更新記憶體/UI，不寫回，避免寫入迴圈與覆蓋他人選擇。
-  const SHARED_KEYS = new Set(["sel", "adult", "showEn", "ui.learnedTags", "ui.extra"]);
+  const SHARED_KEYS = new Set(["sel", "adult", "showEn", "ui.learnedTags", "ui.extra", "ui.selSortMode"]);
 
   function syncExtraFromStorage() {
     const el = $("pos");
@@ -453,17 +453,26 @@
       renderHistory();
       showStage("results");
       const secs = Math.round((Date.now() - S.t0) / 1000);
-      // 標籤學習：依來源分開記錄（生成成功才學）
+      // 標籤學習與統計：只在拿到 validate 過的輸出後執行（失敗／取消／讀歷史都不會到這裡）
+      const splitTok = (raw) => String(raw || "").split(",").map(t => t.trim())
+        .map(t => t.replace(/^\((.*)\)$/, "$1").split(":")[0].trim())
+        .filter(Boolean);
       try {
-        const splitTok = (raw) => String(raw || "").split(",").map(t => t.trim())
-          .map(t => t.replace(/^\((.*)\)$/, "$1").split(":")[0].trim())
-          .filter(Boolean);
         if (window.Tags && typeof window.Tags.learn === "function") {
           window.Tags.learn(splitTok(extraSnap), "general");
           window.Tags.learn((selSnap || []).map(x => x.t), "positive");
           window.Tags.learn(splitTok(negSnap), "negative");
         }
       } catch (e) { /* 學習失敗不影響生成結果 */ }
+      // 統計：一次任務一筆（fileTag 是 UUID），多張圖片不重複計；寫入失敗也不影響生圖
+      try {
+        if (window.Tags && typeof window.Tags.recordGeneration === "function") {
+          window.Tags.recordGeneration({
+            jobId: fileTag, at: Date.now(),
+            pos: splitTok(o.pos), neg: splitTok(o.neg)
+          });
+        }
+      } catch (e) { /* 統計失敗不影響生成結果 */ }
 
       toast(`完成！${secs} 秒 · ${items.length} 張`, "ok");
     } catch (e) {
@@ -989,18 +998,21 @@
     $("revSelList").innerHTML = "";
     $("revTagCount").textContent = "";
     $("revSelCount").textContent = "已選 0 個";
+    rvRenderPicked();
     $("revFootMeta").textContent = "";
     rvUpdateApply();
   }
 
   function rvUpdateApply() {
     const n = RV.picked.size;
-    // 0 筆時仍可點擊，讓 rvApply 顯示白話提示，而不是毫無回應
-    $("revApply").disabled = false;
+    // 尚未選取時停用加入按鈕，避免空操作；選取後才允許送入提示詞。
+    $("revApply").disabled = n === 0;
     $("revApply").classList.toggle("dim", n === 0);
-    $("revApply").title = n === 0 ? "請先選取要加入的標籤" : "";
+    $("revApply").title = n === 0 ? "請先點選想加入的標籤" : "";
     $("revApply").textContent = "加入提示詞（" + n + "）";
     $("revSelCount").textContent = "已選 " + n + " 個";
+    $("revClear").disabled = n === 0;
+    rvUpdateSelectionActions();
   }
 
   /* ── 分類瀏覽（分類依 TagCategories，成人標記依 Tags.isAdult）── */
@@ -1072,7 +1084,10 @@
   function rvRenderPicked() {
     const names = Array.from(RV.picked);
     $("revSelCount").textContent = "已選 " + names.length + " 個";
-    if (!names.length) { $("revSelList").innerHTML = '<span class="rev-empty">還沒選標籤</span>'; return; }
+    if (!names.length) {
+      $("revSelList").innerHTML = '<span class="rev-empty">尚未選取，點選上方標籤即可加入暫存</span>';
+      return;
+    }
     const byName = {};
     rvItems().forEach(it => { byName[it.name] = it; });
     $("revSelList").innerHTML = names.map(n => {
@@ -1197,7 +1212,7 @@
       rvRender();
       const n = RV.general.length + RV.character.length;
       $("revStatus").textContent = n
-        ? ("找到 " + n + " 個標籤，取消不要的，再按「加入提示詞」。")
+        ? ("找到 " + n + " 個候選標籤，點選想加入的項目；也可批次選取目前顯示的標籤。")
         : "這張圖沒找到標籤，換一張試試。";
     } catch (e) {
       rvError(rvExplain(e));
@@ -1216,6 +1231,7 @@
     $("revTagCount").textContent = list.length ? ("（" + list.length + "）") : "";
     if (!list.length) {
       el.innerHTML = '<div class="rev-empty">這個分類沒有標籤，換一個分類或模式看看。</div>';
+      rvUpdateSelectionActions();
       return;
     }
     el.innerHTML = list.map(it => {
@@ -1226,6 +1242,7 @@
         '" title="' + esc(tip) + '"><span>' + esc(text) + '</span><i>' +
         Math.round(it.score * 100) + '</i></button>';
     }).join("");
+    rvUpdateSelectionActions();
   }
 
   function rvRender() {
@@ -1237,9 +1254,8 @@
     } else {
       $("revRating").hidden = true;
     }
-    // 預設全選，使用者再取消不要的（原始結果保持不變）
+    // 反推結果只作候選清單；必須由使用者明確點選，才會進入暫存區。
     RV.picked = new Set();
-    rvItems().forEach(it => RV.picked.add(it.name));
     rvRenderCats();
     rvRenderModes();
     rvRenderTags();
@@ -1272,11 +1288,19 @@
     rvUpdateApply();
   }
 
+  // 批次操作只作用於目前畫面實際顯示的標籤，跨分類已選項目不受影響。
   function rvSetVisible(on) {
     rvVisible().forEach(it => { if (on) RV.picked.add(it.name); else RV.picked.delete(it.name); });
     rvRenderTags();
     rvRenderPicked();
     rvUpdateApply();
+  }
+
+  function rvUpdateSelectionActions() {
+    const visible = rvVisible();
+    const selected = visible.reduce((n, it) => n + (RV.picked.has(it.name) ? 1 : 0), 0);
+    $("revSelAll").disabled = !visible.length || selected === visible.length;
+    $("revSelNone").disabled = selected === 0;
   }
 
   function rvPickCat(cat) {
@@ -1623,7 +1647,9 @@
 
     window.addEventListener("tags:change", () => { syncGo(); });
     window.addEventListener("storage", (e) => {
-      if (e && e.key && SHARED_KEYS.has(e.key)) syncSharedState();
+      if (!e || !e.key) return;
+      // 統計的 main/evt/fav/broken key 都要觸發重建，但重建是唯讀，不會產生寫入迴圈
+      if (SHARED_KEYS.has(e.key) || e.key.indexOf("ui.tagStats") === 0) syncSharedState();
     });
     updateWarn();
     syncGo();
