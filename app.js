@@ -79,7 +79,7 @@
       label.textContent = S.outOk ? "圖片存到 " + S.outDir
         : (S.outError || "輸出目錄未設定 · 刪圖已停用");
       label.title = S.outOk ? S.outDir
-        : "請在啟動 server.py 前設定 COMFY_OUTPUT_DIR 為你的 ComfyUI 輸出資料夾";
+        : "點右欄「設定資料夾」指定 ComfyUI 輸出資料夾，或於啟動前設定 COMFY_OUTPUT_DIR";
     }
     syncDeleteButtons();
   }
@@ -87,7 +87,7 @@
   function syncDeleteButtons() {
     document.querySelectorAll('#stageResults [data-act="del"], #histBar .thumb-del').forEach(b => {
       b.disabled = !S.outOk;
-      b.title = S.outOk ? "刪除這張" : "尚未設定有效的 COMFY_OUTPUT_DIR，無法刪除圖片";
+      b.title = S.outOk ? "刪除這張" : "尚未設定輸出資料夾，請到右欄輸出設定指定";
     });
   }
 
@@ -755,9 +755,13 @@
     if (!it) return;
     if (!S.outOk) {
       openModal("無法刪除圖片", `
-        <p>還沒有設定有效的 COMFY_OUTPUT_DIR，所以不能刪圖（避免刪到其他資料夾）。</p>
-        <p>請在啟動 server.py 前設定為你的 ComfyUI 輸出資料夾，再重新開啟介面。</p>
-        <div class="modal-foot"><button type="button" class="btn btn-ghost" data-close>知道了</button></div>`);
+        <p>還沒有設定輸出資料夾，所以不能刪圖（避免刪到其他資料夾）。</p>
+        <p>請在右欄「輸出設定」按「設定資料夾」，指定你的 ComfyUI 輸出資料夾；也可以在啟動前設定 COMFY_OUTPUT_DIR。</p>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-ghost" data-close>知道了</button>
+          <button type="button" class="btn btn-primary" id="btnGoSetOutput">去設定</button>
+        </div>`);
+      $("btnGoSetOutput").onclick = () => { closeModal(); openOutputDirModal(); };
       return;
     }
     openModal("刪除這張圖？", `
@@ -831,6 +835,54 @@
   }
 
   function closeModal() { closeDialog($("modal")); }
+
+  // 輸出資料夾：由後端驗證並保存，前端只負責輸入完整路徑
+  function openOutputDirModal() {
+    openModal("設定輸出資料夾", `
+      <p class="meta">貼上你的 ComfyUI 輸出資料夾完整路徑。瀏覽器無法取得本機完整路徑，請直接輸入或貼上。</p>
+      <input id="outDirInput" type="text" value="${esc(S.outDir || "")}" placeholder="例如 C:\\Users\\YourName\\ComfyUI\\output" autocomplete="off" spellcheck="false">
+      <p class="meta" id="outDirHint">${S.outOk
+        ? "資料夾必須已存在且可寫入；設定後立即生效，若無法永久保存會明確告知。"
+        : "請貼上你的 ComfyUI 輸出資料夾完整路徑；資料夾必須已存在且可寫入。設定後立即生效，若無法永久保存會明確告知。"}</p>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" data-close>取消</button>
+        <button type="button" class="btn btn-primary" id="btnSaveOutputDir">儲存</button>
+      </div>`);
+    const input = $("outDirInput");
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    const save = async () => {
+      const path = input.value.trim();
+      if (!path) { toast("請輸入資料夾路徑", "warn"); return; }
+      const hint = $("outDirHint");
+      try {
+        const r = await fetch("/api/output-dir", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-SimpleUI": "1" },
+          body: JSON.stringify({ path })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) {
+          hint.textContent = j.error || ("設定失敗（HTTP " + r.status + "）");
+          return;
+        }
+        const st = await fetch("/api/status", { cache: "no-store" }).then(x => x.json());
+        applyOutputStatus(st);
+        if (j.persisted === false) {
+          // 本次已生效，但保存失敗：不可顯示「永久保存成功」，讓使用者看到完整訊息
+          hint.textContent = j.warning || "已即時生效，但無法永久保存，重新啟動後可能失效。";
+          toast("輸出資料夾已即時生效，但無法永久保存（重啟後可能失效）", "warn", 6000);
+          return;
+        }
+        closeModal();
+        toast("輸出資料夾已設定並保存", "ok");
+      } catch (e) {
+        hint.textContent = "無法連到本機服務：" + (e.message || e);
+      }
+    };
+    $("btnSaveOutputDir").onclick = save;
+    input.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); save(); } };
+  }
 
   function showPromptModal() {
     const p = composePrompt();
@@ -1589,7 +1641,7 @@
     $("btnEmptyRandom").onclick = () => { $("btnRandom").click(); };
     const openFolder = async () => {
       if (!S.outOk) {
-        toast(S.outError || "尚未設定有效的 COMFY_OUTPUT_DIR，無法開啟圖片資料夾", "warn", 5000);
+        toast(S.outError || "尚未設定輸出資料夾，請到右欄輸出設定指定", "warn", 5000);
         return;
       }
       try {
@@ -1601,6 +1653,7 @@
       }
     };
     $("btnOpenFolder").onclick = openFolder;
+    $("btnSetOutput").onclick = openOutputDirModal;
 
     // 輸出設定收合／展開：只改 class 與可及性，不碰任何設定值或 localStorage
     const settingsPanel = document.querySelector(".settings");

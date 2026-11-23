@@ -154,8 +154,13 @@ def _parse_output_dir(raw):
 
 OUTPUT_DIR = None
 _OUTPUT_ERROR = ""
+_OUTPUT_LOCK = threading.Lock()
+_OUTPUT_FILE_NAME = "output_dir.txt"
+# 空字串／未設定 = 允許讀取保存設定；有明確內容但無效 = 保持錯誤，絕不偷偷回退
+_OUTPUT_ENV_RAW = os.environ.get("COMFY_OUTPUT_DIR", "")
+_OUTPUT_ENV_EXPLICIT = bool(str(_OUTPUT_ENV_RAW).strip())
 try:
-    OUTPUT_DIR, _OUTPUT_ERROR = _parse_output_dir(os.environ.get("COMFY_OUTPUT_DIR", ""))
+    OUTPUT_DIR, _OUTPUT_ERROR = _parse_output_dir(_OUTPUT_ENV_RAW)
 except OSError as exc:
     OUTPUT_DIR, _OUTPUT_ERROR = None, "COMFY_OUTPUT_DIR 設定錯誤：%s" % exc
 
@@ -207,6 +212,8 @@ WD14_WORKER = _parse_wd14_file(os.environ.get("WD14_WORKER", ""))
 WD14_VIT_PY = _parse_wd14_file(os.environ.get("WD14_VIT_PY", ""))
 WD14_VIT_WORKER = _parse_wd14_file(os.environ.get("WD14_VIT_WORKER", ""))
 WD14_TMP, _WD14_TMP_ERROR = _parse_wd14_tmp(os.environ.get("WD14_TMP", ""))
+# 即使 WD14_TMP 本身因衝突被判無效，輸出資料夾仍不得與使用者指定的路徑重疊
+_WD14_TMP_CONFIGURED, _ = _parse_dir_override(os.environ.get("WD14_TMP", ""), "WD14_TMP")
 
 
 def _looks_like_path(text):
@@ -244,6 +251,91 @@ WD14_START_TIMEOUT = 90                        # Worker 啟動逾時（秒）
 WD14_INFER_TIMEOUT = 120                       # 單張推論逾時（秒）
 WD14_MAX_CONCURRENT = 3                        # 同時反推上限
 WD14_TMP_TTL = 3600                            # 暫存檔存活秒數（超過就清掉）
+
+
+# ── 輸出資料夾：所有來源共用同一套安全驗證 ──
+def _output_dir_conflicts(real):
+    """回傳輸出資料夾與其他受保護目錄衝突的原因；沒有衝突回空字串。"""
+    if real == os.path.dirname(real):
+        return "輸出資料夾不可為磁碟機根目錄"
+    if _is_within(real, ROOT) or real == os.path.realpath(ROOT):
+        return "輸出資料夾不可位於程式資料夾內"
+    wd_candidates = []
+    if WD14_TMP and not _WD14_TMP_ERROR:
+        wd_candidates.append(os.path.realpath(WD14_TMP))
+    if _WD14_TMP_CONFIGURED:
+        wd_candidates.append(_WD14_TMP_CONFIGURED)
+    for wd in wd_candidates:
+        if _is_within(real, wd) or _is_within(wd, real):
+            return "輸出資料夾不可與反推暫存目錄重疊"
+    return ""
+
+
+def _validate_output_dir(raw):
+    """所有輸出資料夾來源共用的驗證：先格式、再安全邊界。回 (real, error)。"""
+    real, err = _parse_output_dir(raw)
+    if err:
+        return None, err
+    return real, _output_dir_conflicts(real)
+
+
+def _persist_output_dir(real):
+    """寫入保存設定；成功回空字串，失敗回白話原因（不再吞掉錯誤）。"""
+    target = os.path.join(DATA_DIR, _OUTPUT_FILE_NAME)
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(real)
+    except OSError as exc:
+        return "無法寫入保存設定 %s（%s）；本次設定仍已生效，但重新啟動後會失效。" % (target, exc)
+    return ""
+
+
+def set_output_dir(raw):
+    """驗證並設定輸出資料夾；回 (ok, error, persisted)。
+
+    - ok        ：本次執行是否已套用（保存失敗也為 True）
+    - error     ：驗證失敗或保存失敗的白話原因；完全成功為空字串
+    - persisted ：是否已永久保存；False 代表重新啟動後可能失效
+    驗證失敗時完全不碰目前的 OUTPUT_DIR，避免破壞有效的輸出路徑。
+    「更新記憶體」與「寫入保存檔」必須在同一個鎖內完成，避免兩個請求
+    造成記憶體是最後一個、保存檔卻是較早一個的交叉覆蓋。
+    """
+    global OUTPUT_DIR, _OUTPUT_ERROR
+    real, err = _validate_output_dir(raw)
+    if err:
+        return False, err, False
+    with _OUTPUT_LOCK:
+        OUTPUT_DIR = real
+        _OUTPUT_ERROR = ""
+        err = _persist_output_dir(real)   # 不釋放鎖，序列化整個更新＋保存
+        if err:
+            return True, err, False
+        return True, "", True
+
+
+# 啟動環境變數也必須通過同一套安全驗證，不可只在 UI／保存檔檢查
+if OUTPUT_DIR:
+    _env_real, _env_err = _validate_output_dir(_OUTPUT_ENV_RAW)
+    if _env_err:
+        OUTPUT_DIR = None
+        _OUTPUT_ERROR = "COMFY_OUTPUT_DIR 設定無效（%s）。請改用其他資料夾後重新啟動生圖介面；基本生圖不受影響。" % _env_err
+elif _OUTPUT_ENV_EXPLICIT:
+    # 明確設定但無效：保留錯誤狀態，絕不回退到 output_dir.txt 的舊設定
+    _OUTPUT_ERROR = "COMFY_OUTPUT_DIR 設定無效（%s）。請修正或移除這個環境變數後重新啟動生圖介面；基本生圖不受影響。" % _OUTPUT_ERROR
+else:
+    # 只有環境變數未設定時，才讀取使用者在介面儲存的設定
+    try:
+        with open(os.path.join(DATA_DIR, _OUTPUT_FILE_NAME), "r", encoding="utf-8") as f:
+            _saved = f.read().strip()
+    except OSError:
+        _saved = ""
+    if _saved:
+        _saved_real, _saved_err = _validate_output_dir(_saved)
+        if _saved_real and not _saved_err:
+            OUTPUT_DIR, _OUTPUT_ERROR = _saved_real, ""
+        elif _saved_err and "尚未設定" not in _saved_err:
+            _OUTPUT_ERROR = "儲存的輸出資料夾設定無效（%s）。請到右欄「輸出設定」重新指定。" % _saved_err
 
 
 def port_open(port, host="127.0.0.1"):
@@ -753,7 +845,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path == "/open-output":
             if not OUTPUT_DIR:
                 return self._json(409, {"ok": False, "code": "OUTPUT_DIR_UNSET",
-                                        "error": "尚未設定有效的 COMFY_OUTPUT_DIR，無法開啟圖片資料夾。請在啟動 server.py 前設定為你的 ComfyUI 輸出資料夾。"})
+                                        "error": "尚未設定輸出資料夾，無法開啟。請在右欄「輸出設定」按「設定資料夾」，或於啟動前設定 COMFY_OUTPUT_DIR。"})
             try:
                 os.startfile(OUTPUT_DIR)
                 return self._json(200, {"ok": True, "output": OUTPUT_DIR})
@@ -803,7 +895,51 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._delete_file()
         if self.path == "/api/reverse":
             return self._reverse()
+        if self.path == "/api/output-dir":
+            return self._set_output_dir()
         return self._json(404, {"error": "not found"})
+
+    # ── 由介面設定輸出資料夾（只接受同源請求）──────────────────
+    def _set_output_dir(self):
+        # 自訂 header 讓跨站請求必須通過 CORS preflight；本伺服器不提供 CORS。
+        if self.headers.get("X-SimpleUI") != "1":
+            return self._json(403, {"ok": False, "code": "FORBIDDEN",
+                                    "error": "無效的請求來源"})
+        origin = self.headers.get("Origin")
+        if origin:
+            port = self.server.server_address[1]
+            allowed = {"http://127.0.0.1:%d" % port, "http://localhost:%d" % port}
+            if origin not in allowed:
+                return self._json(403, {"ok": False, "code": "FORBIDDEN",
+                                        "error": "無效的請求來源"})
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if n > 8192:
+            return self._json(413, {"ok": False, "code": "TOO_LARGE",
+                                    "error": "請求太大"})
+        try:
+            data = json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            return self._json(400, {"ok": False, "code": "BAD_JSON",
+                                    "error": "請求格式錯誤"})
+        raw = data.get("path") if isinstance(data, dict) else None
+        if not isinstance(raw, str) or not raw.strip():
+            return self._json(400, {"ok": False, "code": "OUTPUT_DIR_INVALID",
+                                    "error": "請提供輸出資料夾的完整路徑"})
+        ok, err, persisted = set_output_dir(raw)
+        if not ok:
+            return self._json(400, {"ok": False, "code": "OUTPUT_DIR_INVALID",
+                                    "error": err})
+        with _OUTPUT_LOCK:
+            current = OUTPUT_DIR or ""
+        body = {"ok": True, "output": current, "persisted": bool(persisted)}
+        if not persisted:
+            # 本次已生效但保存失敗：不可回報「永久保存成功」
+            body["code"] = "OUTPUT_NOT_PERSISTED"
+            body["warning"] = ("輸出資料夾已即時生效，但無法永久保存（%s）。"
+                               "重新啟動生圖介面後可能失效；請檢查 %s 的寫入權限，"
+                               "或改用右欄「輸出設定」重新設定。" %
+                               (err, os.path.join(DATA_DIR, _OUTPUT_FILE_NAME)))
+        return self._json(200, body)
 
     # ── 檢查圖片是否還在（直接問 ComfyUI，不靠猜輸出資料夾）────────
     def _check_files(self):
@@ -888,10 +1024,11 @@ class H(http.server.BaseHTTPRequestHandler):
         except Exception:
             return self._json(400, {"ok": False, "code": "BAD_JSON", "error": "請求格式錯誤"})
 
-        if not OUTPUT_DIR:
+        out_dir = OUTPUT_DIR          # 快照，避免設定變更造成前後不一致
+        if not out_dir:
             return self._json(409, {
                 "ok": False, "code": "OUTPUT_DIR_UNSET",
-                "error": "尚未設定有效的 COMFY_OUTPUT_DIR，已取消刪圖。請在啟動 server.py 前設定為你的 ComfyUI 輸出資料夾；圖片與紀錄都還在。"
+                "error": "尚未設定輸出資料夾，已取消刪圖。請在右欄「輸出設定」按「設定資料夾」，或於啟動前設定 COMFY_OUTPUT_DIR；圖片與紀錄都還在。"
             })
 
         name = str(data.get("filename") or "").strip()
@@ -906,7 +1043,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._json(400, {"ok": False, "code": "TYPE_NOT_ALLOWED",
                                     "error": "只能刪除輸出類型的圖片，已取消刪圖"})
 
-        root = os.path.realpath(OUTPUT_DIR)
+        root = os.path.realpath(out_dir)
         try:
             path = os.path.realpath(os.path.join(root, sub, name))
             inside = os.path.commonpath([root, path]) == root
@@ -958,7 +1095,7 @@ class H(http.server.BaseHTTPRequestHandler):
 
         if not local_exists:
             return self._json(409, {"ok": False, "code": "PATH_MISMATCH",
-                                    "error": "ComfyUI 仍有這張圖，但本機輸出資料夾找不到對應檔案，請檢查 COMFY_OUTPUT_DIR 是否正確；已取消刪圖。"})
+                                    "error": "ComfyUI 仍有這張圖，但本機輸出資料夾找不到對應檔案，請檢查輸出資料夾設定是否正確；已取消刪圖。"})
 
         # 本機檔案：驗證前後都比對狀態，避免驗證期間被替換
         try:

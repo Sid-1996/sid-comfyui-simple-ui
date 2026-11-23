@@ -60,7 +60,10 @@ ui_panel.ps1        開發者本機輔助控制台，含環境專屬路徑；公
 - `POST /api/check`：檢查歷史圖片是否仍存在（向 ComfyUI 的 `/view` 發 HEAD）。
 - `POST /api/delete`：刪圖；必須通過路徑、類型及 SHA-256 內容比對。
 - `POST /api/reverse`：WD14 反推（選用）。
-- `GET /open-output`、`POST /start-comfy`：均由 `COMFY_OUTPUT_DIR` / `COMFY_LAUNCH_CMD` 控制。
+- `GET /open-output`、`POST /start-comfy`：均由輸出資料夾 / `COMFY_LAUNCH_CMD` 控制。
+- `POST /api/output-dir`：由介面設定輸出資料夾；body 為 `{"path": "<absolute path>"}`。只接受帶 `X-SimpleUI: 1` 的同源請求（Origin 存在時也必須匹配本頁 host），避免跨站竄改本機路徑。
+- 輸出資料夾來源：啟動環境變數 `COMFY_OUTPUT_DIR`（有明確設定但無效時保持錯誤，**不回退**到保存設定）→ 未設定時才讀使用者資料目錄的 `output_dir.txt` → 未設定。三種來源共用同一套驗證（絕對路徑、存在、可讀寫、非磁碟根、不在 Repo 內、不與 `WD14_TMP` 重疊）。介面設定立即更新全域 `OUTPUT_DIR`；保存寫入失敗時 API 回 `persisted:false` 與 `OUTPUT_NOT_PERSISTED`，前端明確提示重啟後可能失效，不假裝永久保存成功。
+- 設定輸出資料夾時不得放寬既有安全檢查：路徑必須絕對、存在、可讀寫、不是磁碟根、不在 Repo 內、不與 `WD14_TMP` 重疊；刪圖仍須通過 SHA-256 內容比對。
 
 規則：
 
