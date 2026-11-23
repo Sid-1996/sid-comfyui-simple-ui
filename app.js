@@ -27,6 +27,7 @@
 
   const S = {
     running: false, starting: false, cancelled: false, promptId: null, comfyUp: false, external: false,
+    outDir: "", outOk: false, outError: "",
     settings: Object.assign({}, DEFAULTS, loadJSON("ui.settings", {})),
     gallery: loadJSON("ui.gallery", []),
     results: [], lbList: [], lbIndex: 0, queue: 0,
@@ -54,6 +55,40 @@
       throw new Error(path + " → " + r.status + " " + t.slice(0, 300));
     }
     return r;
+  }
+
+  // 圖片 complete key：filename + subfolder + type，相容舊版只存 url/filename 的紀錄
+  function itemQuery(it) {
+    return new URLSearchParams(((it && it.url) || "").split("?")[1] || "");
+  }
+  function fileKey(it) {
+    const q = itemQuery(it);
+    const name = String(it && it.filename != null ? it.filename : (q.get("filename") || ""));
+    const sub = String(it && it.subfolder != null ? it.subfolder : (q.get("subfolder") || "")) || "";
+    const typ = String(it && it.type != null ? it.type : (q.get("type") || "output")) || "output";
+    return name + "\u0000" + sub + "\u0000" + typ;
+  }
+
+  function applyOutputStatus(j) {
+    if (!j) return;
+    S.outOk = typeof j.output_ok === "boolean" ? j.output_ok : !!j.output;
+    S.outError = j.output_error || "";
+    S.outDir = j.output || "";
+    const label = $("outPath");
+    if (label) {
+      label.textContent = S.outOk ? "圖片存到 " + S.outDir
+        : (S.outError || "輸出目錄未設定 · 刪圖已停用");
+      label.title = S.outOk ? S.outDir
+        : "請在啟動 server.py 前設定 COMFY_OUTPUT_DIR 為你的 ComfyUI 輸出資料夾";
+    }
+    syncDeleteButtons();
+  }
+
+  function syncDeleteButtons() {
+    document.querySelectorAll('#stageResults [data-act="del"], #histBar .thumb-del').forEach(b => {
+      b.disabled = !S.outOk;
+      b.title = S.outOk ? "刪除這張" : "尚未設定有效的 COMFY_OUTPUT_DIR，無法刪除圖片";
+    });
   }
 
   function translateError(e) {
@@ -108,6 +143,7 @@
     try {
       const st = await fetch("/api/status", { cache: "no-store" }).then(r => r.json());
       if (st && typeof st.external === "boolean") S.external = st.external;
+      applyOutputStatus(st);
     } catch (e) { /* 保持前一次已知狀態 */ }
     try {
       const r = await fetch("/comfy/system_stats", { cache: "no-store" });
@@ -559,6 +595,7 @@
         syncGallery();
       }, { once: true });
     });
+    syncDeleteButtons();
   }
 
   function renderHistory() {
@@ -573,6 +610,7 @@
           <button type="button" class="thumb-del" data-del="${i}" title="刪除這張" aria-label="刪除第 ${i + 1} 張">×</button>
         </div>`).join("")
       : "";
+    syncDeleteButtons();
     if (!has) return;
     $("histBar").querySelectorAll("img").forEach(img => {
       img.addEventListener("error", () => {
@@ -593,7 +631,7 @@
     syncing = true;
     try {
       const files = S.gallery.map(it => {
-        const q = new URLSearchParams((it.url || "").split("?")[1] || "");
+        const q = itemQuery(it);
         return {
           filename: it.filename,
           subfolder: q.get("subfolder") || "",
@@ -609,10 +647,10 @@
       const j = await r.json();
       // 後台說「ComfyUI 沒開」時不要動任何東西，避免誤刪
       if (j.comfy === false) return;
-      const gone = new Set((j.missing || []).map(x => x.filename));
+      const gone = new Set((j.missing || []).map(fileKey));
       if (!gone.size) return;
 
-      const keep = S.gallery.filter(it => !gone.has(it.filename));
+      const keep = S.gallery.filter(it => !gone.has(fileKey(it)));
       const alive = new Set(keep.map(it => it.url));
       S.gallery = keep;
       saveJSON("ui.gallery", S.gallery);
@@ -708,10 +746,17 @@
   /* ── 刪圖 ─────────────────────────────────────────────── */
   function confirmDelete(it) {
     if (!it) return;
+    if (!S.outOk) {
+      openModal("無法刪除圖片", `
+        <p>還沒有設定有效的 COMFY_OUTPUT_DIR，所以不能刪圖（避免刪到其他資料夾）。</p>
+        <p>請在啟動 server.py 前設定為你的 ComfyUI 輸出資料夾，再重新開啟介面。</p>
+        <div class="modal-foot"><button type="button" class="btn btn-ghost" data-close>知道了</button></div>`);
+      return;
+    }
     openModal("刪除這張圖？", `
       <div class="del-preview"><img src="${esc(it.url)}" alt=""></div>
       <p class="del-name">${esc(it.filename)}</p>
-      <p>圖片會移到 Windows 資源回收筒（之後還能還原），歷史紀錄也會一起移除。</p>
+      <p>圖片會移到 Windows 資源回收筒（之後還能還原），歷史紀錄也會一起移除。若回收筒失敗，圖片與紀錄都會保留。</p>
       <div class="modal-foot">
         <button type="button" class="btn btn-ghost" data-close>取消</button>
         <button type="button" class="btn btn-danger" id="btnDoDelete">刪除</button>
@@ -748,7 +793,7 @@
   }
 
   async function doDelete(it) {
-    const q = new URLSearchParams((it.url || "").split("?")[1] || "");
+    const q = itemQuery(it);
     try {
       const r = await fetch("/api/delete", {
         method: "POST",
@@ -760,11 +805,14 @@
         })
       });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+      if (!r.ok || j.ok !== true) throw new Error(j.error || ("HTTP " + r.status));
+      if (j.status !== "deleted" && j.status !== "already_gone")
+        throw new Error(j.error || "後端沒有明確回報刪除結果");
       dropImages([it.url]);
-      toast(j.recycled ? "已刪除，檔案在資源回收筒" : "已刪除", "ok");
+      toast(j.status === "already_gone" ? "圖片已不存在，已從紀錄移除"
+        : (j.recycled ? "已刪除，檔案在資源回收筒" : "已刪除"), "ok");
     } catch (e) {
-      toast("刪不掉：" + (e.message || e) + "（檔案可能被鎖住）", "err", 5000);
+      toast("刪不掉：" + (e.message || e) + "。圖片與紀錄都保留。", "err", 5000);
     }
   }
 
@@ -1515,7 +1563,19 @@
       toast(`套用「${n}」`, "ok");
     };
     $("btnEmptyRandom").onclick = () => { $("btnRandom").click(); };
-    const openFolder = () => fetch("/open-output").catch(() => {});
+    const openFolder = async () => {
+      if (!S.outOk) {
+        toast(S.outError || "尚未設定有效的 COMFY_OUTPUT_DIR，無法開啟圖片資料夾", "warn", 5000);
+        return;
+      }
+      try {
+        const r = await fetch("/open-output");
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+      } catch (e) {
+        toast("無法開啟資料夾：" + (e.message || e), "err", 5000);
+      }
+    };
     $("btnOpenFolder").onclick = openFolder;
 
     // 輸出設定收合／展開：只改 class 與可及性，不碰任何設定值或 localStorage
@@ -1674,7 +1734,7 @@
 
     // 輸出資料夾：由後端回報，不在前端寫死路徑
     fetch("/api/status", { cache: "no-store" }).then(r => r.json()).then(j => {
-      if (j && j.output) { S.outDir = j.output; $("outPath").textContent = "圖片存到 " + j.output; }
+      applyOutputStatus(j);
       if (j && typeof j.external === "boolean") S.external = j.external;
     }).catch(() => { /* 保持預設文字 */ });
 

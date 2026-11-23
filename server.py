@@ -73,7 +73,34 @@ except ValueError as exc:
 COMFY_ROOT = r"C:\ComfyUI\ComfyUI_windows_portable"
 COMFY_PY = os.path.join(COMFY_ROOT, "python_embeded", "python.exe")
 LOG_DIR = r"C:\ComfyUI\logs"
-OUTPUT_DIR = r"D:\ComfyUI_output"
+
+
+def _parse_output_dir(raw):
+    """解析 COMFY_OUTPUT_DIR；無效時回 (None, 白話原因)，不猜測、不建立目錄。"""
+    text = os.path.expandvars(os.path.expanduser((raw or "").strip()))
+    if not text:
+        return None, "尚未設定 COMFY_OUTPUT_DIR"
+    if not os.path.isabs(text):
+        return None, "COMFY_OUTPUT_DIR 必須是絕對路徑"
+    if not os.path.exists(text):
+        return None, "COMFY_OUTPUT_DIR 指向的資料夾不存在"
+    if not os.path.isdir(text):
+        return None, "COMFY_OUTPUT_DIR 指向的不是資料夾"
+    try:
+        os.listdir(text)
+    except OSError as exc:
+        return None, "無法讀取 COMFY_OUTPUT_DIR：%s" % exc
+    if not os.access(text, os.W_OK):
+        return None, "沒有 COMFY_OUTPUT_DIR 的寫入權限，無法刪圖"
+    return os.path.realpath(text), ""
+
+
+OUTPUT_DIR = None
+_OUTPUT_ERROR = ""
+try:
+    OUTPUT_DIR, _OUTPUT_ERROR = _parse_output_dir(os.environ.get("COMFY_OUTPUT_DIR", ""))
+except OSError as exc:
+    OUTPUT_DIR, _OUTPUT_ERROR = None, "COMFY_OUTPUT_DIR 設定錯誤：%s" % exc
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(ROOT, "assets")
@@ -159,9 +186,11 @@ def start_comfy(wait_seconds=180):
         os.makedirs(LOG_DIR, exist_ok=True)
         out = open(os.path.join(LOG_DIR, "comfyui.log"), "ab", buffering=0)
         err = open(os.path.join(LOG_DIR, "comfyui.err.log"), "ab", buffering=0)
+        args = [COMFY_PY, "-s", r"ComfyUI\main.py", "--windows-standalone-build"]
+        if OUTPUT_DIR:
+            args += ["--output-directory", OUTPUT_DIR]
         subprocess.Popen(
-            [COMFY_PY, "-s", r"ComfyUI\main.py", "--windows-standalone-build",
-             "--output-directory", OUTPUT_DIR],
+            args,
             cwd=COMFY_ROOT, stdout=out, stderr=err,
             creationflags=0x08000000,  # CREATE_NO_WINDOW
         )
@@ -558,14 +587,20 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/comfy/"):
             return self._proxy()
         if self.path == "/open-output":
+            if not OUTPUT_DIR:
+                return self._json(409, {"ok": False, "code": "OUTPUT_DIR_UNSET",
+                                        "error": "尚未設定有效的 COMFY_OUTPUT_DIR，無法開啟圖片資料夾。請在啟動 server.py 前設定為你的 ComfyUI 輸出資料夾。"})
             try:
                 os.startfile(OUTPUT_DIR)
-                return self._json(200, {"ok": True})
+                return self._json(200, {"ok": True, "output": OUTPUT_DIR})
             except Exception as e:
-                return self._json(500, {"ok": False, "error": str(e)})
+                return self._json(500, {"ok": False, "code": "OPEN_FAILED",
+                                        "error": "無法開啟圖片資料夾：%s" % e})
         if self.path == "/api/status":
-            return self._json(200, {"comfy": comfy_up(), "output": OUTPUT_DIR,
-                                    "external": COMFY_EXTERNAL})
+            return self._json(200, {"comfy": comfy_up(), "output": OUTPUT_DIR or "",
+                                    "external": COMFY_EXTERNAL,
+                                    "output_ok": bool(OUTPUT_DIR),
+                                    "output_error": _OUTPUT_ERROR})
         if self.path == "/api/check":
             return self._json(405, {"error": "use POST"})
         if self.path == "/api/reverse":
@@ -645,38 +680,151 @@ class H(http.server.BaseHTTPRequestHandler):
                 missing.append(it)
         return self._json(200, {"missing": missing, "comfy": True, "total": len(files)})
 
-    # ── 刪圖（移到資源回收筒，路徑必須在輸出資料夾內）──────────────
+    # ── 刪圖（輸出目錄 + ComfyUI /view 雙重確認）──────────────────
+    def _view_status(self, q):
+        """HEAD ComfyUI /view；回 ('present'|'missing'|'error'|'unreachable', headers, msg)"""
+        if not comfy_up():
+            return "unreachable", None, "ComfyUI 沒有連線"
+        req = urllib.request.Request(COMFY + "/view?" + q, method="HEAD")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                if 200 <= r.status < 300:
+                    return "present", r.headers, ""
+                return "error", None, "ComfyUI /view 回應 HTTP %s" % r.status
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):
+                return "missing", None, ""
+            return "error", None, "ComfyUI /view 回應 HTTP %s" % e.code
+        except Exception as e:
+            return "unreachable", None, "無法連到 ComfyUI：%s" % e
+
+    @staticmethod
+    def _hash_stream(stream):
+        """串流計算 SHA-256 並計位元組數，不把整張圖讀進 RAM。"""
+        h = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+            total += len(chunk)
+        return h.hexdigest(), total
+
     def _delete_file(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
         if n > 20_000:
-            return self._json(413, {"ok": False, "error": "too large"})
+            return self._json(413, {"ok": False, "code": "TOO_LARGE", "error": "請求太大"})
         try:
             data = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
-            return self._json(400, {"ok": False, "error": "bad json"})
+            return self._json(400, {"ok": False, "code": "BAD_JSON", "error": "請求格式錯誤"})
+
+        if not OUTPUT_DIR:
+            return self._json(409, {
+                "ok": False, "code": "OUTPUT_DIR_UNSET",
+                "error": "尚未設定有效的 COMFY_OUTPUT_DIR，已取消刪圖。請在啟動 server.py 前設定為你的 ComfyUI 輸出資料夾；圖片與紀錄都還在。"
+            })
 
         name = str(data.get("filename") or "").strip()
         sub = str(data.get("subfolder") or "").strip().replace("\\", "/").strip("/")
         typ = str(data.get("type") or "output")
-        if not name or "/" in name or "\\" in name or ".." in sub:
-            return self._json(400, {"ok": False, "error": "檔名不合法"})
+        if (not name or name in (".", "..") or
+                any(c in name for c in ("/", "\\", "\0", ":")) or
+                ".." in sub.split("/") or ":" in sub):
+            return self._json(400, {"ok": False, "code": "FORBIDDEN_PATH",
+                                    "error": "檔名或資料夾名稱不合法，已取消刪圖"})
         if typ != "output":
-            return self._json(400, {"ok": False, "error": "只能刪輸出圖"})
+            return self._json(400, {"ok": False, "code": "TYPE_NOT_ALLOWED",
+                                    "error": "只能刪除輸出類型的圖片，已取消刪圖"})
 
         root = os.path.realpath(OUTPUT_DIR)
-        path = os.path.realpath(os.path.join(root, sub, name))
-        if os.path.dirname(path) != root and not path.startswith(root + os.sep):
-            return self._json(400, {"ok": False, "error": "路徑不合法"})
-        if not os.path.isfile(path):
-            return self._json(200, {"ok": True, "already": True})
-
-        if recycle(path):
-            return self._json(200, {"ok": True, "recycled": True})
         try:
-            os.remove(path)
-            return self._json(200, {"ok": True, "recycled": False})
+            path = os.path.realpath(os.path.join(root, sub, name))
+            inside = os.path.commonpath([root, path]) == root
+        except (ValueError, OSError):
+            inside = False
+        if not inside or path == root or os.path.isdir(path):
+            return self._json(400, {"ok": False, "code": "FORBIDDEN_PATH",
+                                    "error": "這個檔案不在允許的輸出資料夾內，已取消刪圖"})
+
+        q = urllib.parse.urlencode({"filename": name, "subfolder": sub, "type": typ})
+        state, headers, msg = self._view_status(q)
+        if state in ("unreachable", "error"):
+            code = "COMFY_UNREACHABLE" if state == "unreachable" else "VIEW_ERROR"
+            return self._json(502, {"ok": False, "code": code,
+                                    "error": (msg or "無法確認 ComfyUI 的圖片") + "，已取消刪圖；圖片與紀錄都還在。"})
+
+        local_exists = os.path.isfile(path)
+        if state == "missing":
+            if local_exists:
+                return self._json(409, {"ok": False, "code": "PATH_MISMATCH",
+                                        "error": "ComfyUI 找不到這張圖，但本機輸出資料夾有同名檔案；為避免刪錯，已取消刪圖。"})
+            return self._json(200, {"ok": True, "status": "already_gone"})
+
+        # state == "present"：取得 ComfyUI 實際圖片內容（串流 hash，不寫暫存檔）
+        # 即使本機暫時找不到檔案也要問 GET，才能區分「ComfyUI 也沒有」與「路徑設錯」。
+        try:
+            with urllib.request.urlopen(COMFY + "/view?" + q, timeout=15) as r:
+                if not (200 <= r.status < 300):
+                    return self._json(502, {"ok": False, "code": "VIEW_ERROR",
+                                            "error": "ComfyUI /view 回應 HTTP %s，無法驗證圖片內容，已取消刪圖。" % r.status})
+                remote_hash, remote_bytes = self._hash_stream(r)
+                length = r.headers.get("Content-Length") if r.headers else None
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):
+                if not os.path.isfile(path):
+                    return self._json(200, {"ok": True, "status": "already_gone"})
+                return self._json(409, {"ok": False, "code": "PATH_MISMATCH",
+                                        "error": "ComfyUI 取得圖片時回報找不到，但本機仍有同名檔案；已取消刪圖。"})
+            return self._json(502, {"ok": False, "code": "VIEW_ERROR",
+                                    "error": "ComfyUI /view 回應 HTTP %s，無法驗證圖片內容，已取消刪圖。" % e.code})
         except Exception as e:
-            return self._json(500, {"ok": False, "error": str(e)})
+            return self._json(502, {"ok": False, "code": "COMFY_UNREACHABLE",
+                                    "error": "取得 ComfyUI 圖片失敗：%s，已取消刪圖。" % e})
+
+        # Content-Length 只拿來檢查回應是否完整，不再當作內容相同的證據
+        if length and str(length).isdigit() and int(length) != remote_bytes:
+            return self._json(502, {"ok": False, "code": "COMFY_UNREACHABLE",
+                                    "error": "ComfyUI 回傳的圖片不完整，無法驗證內容，已取消刪圖。"})
+
+        if not local_exists:
+            return self._json(409, {"ok": False, "code": "PATH_MISMATCH",
+                                    "error": "ComfyUI 仍有這張圖，但本機輸出資料夾找不到對應檔案，請檢查 COMFY_OUTPUT_DIR 是否正確；已取消刪圖。"})
+
+        # 本機檔案：驗證前後都比對狀態，避免驗證期間被替換
+        try:
+            before = os.stat(path)
+            with open(path, "rb") as f:
+                local_hash, _ = self._hash_stream(f)
+            after = os.stat(path)
+        except OSError as e:
+            return self._json(500, {"ok": False, "code": "FS_ERROR",
+                                    "error": "無法讀取本機圖片：%s，已取消刪圖。" % e})
+
+        def sig(st):
+            return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+        try:
+            unchanged = (sig(before) == sig(after) and os.path.isfile(path) and
+                         os.path.realpath(os.path.join(root, sub, name)) == path)
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            return self._json(409, {"ok": False, "code": "PATH_MISMATCH",
+                                    "error": "圖片在驗證期間被變動或路徑已改變，已取消刪圖；請再試一次。"})
+
+        if local_hash != remote_hash:
+            return self._json(409, {"ok": False, "code": "PATH_MISMATCH",
+                                    "error": "本機圖片與 ComfyUI 回傳的內容不同（SHA-256 不一致），可能不是同一張，已取消刪圖。"})
+
+        if not recycle(path):
+            return self._json(500, {"ok": False, "code": "RECYCLE_FAILED",
+                                    "error": "無法把圖片移到資源回收筒（可能檔案被鎖住）；原始圖片與紀錄都保留。"})
+        if os.path.exists(path):
+            return self._json(500, {"ok": False, "code": "DELETE_UNVERIFIED",
+                                    "error": "資源回收筒回報成功但檔案還在，無法確認刪除結果；原始圖片與紀錄都保留。"})
+        return self._json(200, {"ok": True, "status": "deleted", "recycled": True})
 
     # ── 圖片反推（WD14 CPU Worker）─────────────────────────────
     def _drain(self, n, cap=64 * 1024 * 1024):
