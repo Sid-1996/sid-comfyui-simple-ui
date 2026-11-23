@@ -1167,10 +1167,20 @@
 
   function rvExplain(e) {
     const m = String((e && e.message) || e);
+    const code = (e && e.code) || "";
+    const status = e && e.status;
+    // 後端 /api/reverse 的 WORKER_ERROR 包含「資源不存在」與「服務暫時失敗」：
+    // 先用 code 判斷大類，再從 error 內容區分是否為找不到 Worker（server.py 找不到 WD14 Python/Worker）。
+    if (code === "WORKER_ERROR" && /找不到 WD14|未安裝|not found/i.test(m))
+      return "WD14 反推功能尚未安裝或未完成設定，所以這張圖沒有分析了。基本生圖不受影響，可以繼續用；若要啟用反推，請先準備 WD14 的 Worker、模型與 Python 環境。";
+    if (code === "WORKER_ERROR")
+      return "反推服務暫時沒回應，按一下 F5 重新整理再試；基本生圖不受影響。";
     // 忙碌（429）不是失敗：直接顯示後端的白話訊息，不要冠「反推失敗」
-    if (/太多|等一下再試|稍等|忙碌/.test(m)) return m;
+    if (code === "BUSY" || /太多|等一下再試|稍等|忙碌/.test(m)) return m;
+    if (code === "TMP_FAIL") return "暫存圖片失敗，請重新選一次圖片再試。";
     if (/逾時/.test(m)) return "分析太久了，這次沒等到結果。按「反推標籤」再試一次，或換張小一點的圖。";
-    if (/Worker|worker|503|502/.test(m)) return "反推服務沒回應，按一下 F5 重新整理再試。";
+    if (status === 502 || status === 503 || /Failed to fetch|network error/i.test(m))
+      return "反推服務沒回應，按一下 F5 重新整理再試。";
     if (/只認|格式/.test(m)) return "這個檔案格式不行，請換 PNG 或 JPG 圖片。";
     if (/太大/.test(m)) return "圖片太大囉，換小一點的再試（最長邊 1024px 會自動縮）。";
     if (/太小/.test(m)) return "這張圖太小了，看不出內容，換大一點的試試。";
@@ -1265,7 +1275,13 @@
         })
       });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+      if (!r.ok || !j.ok) {
+        // 保留後端錯誤碼與 HTTP status，讓 rvExplain 用 code 判斷，而不是只猜訊息文字
+        const err = new Error(j.error || ("HTTP " + r.status));
+        err.code = j.code || "";
+        err.status = r.status;
+        throw err;
+      }
       RV.rating = j.rating || null;
       RV.general = Array.isArray(j.general) ? j.general : [];
       RV.character = Array.isArray(j.character) ? j.character : [];

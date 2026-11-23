@@ -1095,8 +1095,9 @@ def main():
     n = purge_wd14_tmp()
     if n:
         print("清掉 %d 個過期的反推暫存檔" % n)
-    print("簡易生圖: http://127.0.0.1:7860  (ComfyUI: %s)" % ("已連線" if comfy_up() else "未啟動"))
+    # 先取得實際監聽 port，再印網址，避免提示與 bind 的 port 不一致
     port = int(os.environ.get("SIMPLE_UI_PORT", "7860") or 7860)
+    print("簡易生圖: http://127.0.0.1:%d  (ComfyUI: %s)" % (port, "已連線" if comfy_up() else "未啟動"))
     try:
         S(("127.0.0.1", port), H).serve_forever()
     finally:
