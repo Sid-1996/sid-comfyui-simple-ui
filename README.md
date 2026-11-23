@@ -1,39 +1,44 @@
-# Sid 的 ComfyUI 簡易生圖介面
+# Sid-simple-ui：ComfyUI 簡易生圖介面
 
-> 一個給「不想碰 ComfyUI 節點」的人用的單頁生圖前端。
-> 我自己日常在用，順手整理成公開寶藏，歡迎參考、自用、改造。
+一個給「不想碰 ComfyUI 節點」的人用的單頁生圖前端。你把 ComfyUI 留在背景，改用這個頁面點標籤、按一顆生成鍵就有圖。
 
-## 這是什麼
+> 這是我自己日常在用、順手整理出來的公開版本。歡迎參考、自用或改造。
 
-Sid-simple-ui 是 ComfyUI 的**外部極簡生圖前端**。你把 ComfyUI 留在背景，改用這個頁面點標籤、按一顆「生成」鍵就有圖。
+## 這個專案能做什麼
 
-- 你在自己的電腦上執行這個介面，連接**你自己啟動的 ComfyUI**
-- 生圖使用的是你自己的硬體、Checkpoint、模型與資源
+Sid-simple-ui 是 ComfyUI 的**外部極簡前端**，不是 ComfyUI 本身，也不是雲端代繪服務。
+
+- 你連接的是**自己電腦上自行安裝與啟動的 ComfyUI**
+- 生圖使用你自己的硬體、Checkpoint、模型與資源
 - 不需要連接開發者的電腦，也不使用任何外部代繪服務
-- 左邊標籤庫、中間舞台、右邊設定，只有一個主要動作
-- 中文標籤 ↔ Danbooru 英文自動對照
-- 生成進度、取消、歷史縮圖、燈箱、快捷鍵
-- 18+ 標籤預設隱藏，需手動開啟
-- 標籤使用會自動學習，下次更快
-- WD14 圖片反推是**選用功能**，預設不包含（見下方說明）
+- 不需要學習 ComfyUI 的節點操作
 
-> 前端由 HTML / CSS / JavaScript 組成，沒有 build step；`server.py` 只使用 Python 標準庫。
+> ComfyUI 必須由你自己安裝、啟動與管理；它的 Python、顯示卡驅動與模型請依 ComfyUI 官方文件準備，不屬於本專案。
+
+## 介面特色與主要功能
+
+- 左邊是標籤庫，中間是結果舞台，右邊是設定，底部只有一個主要動作：**生成**
+- 中文標籤會自動對照成繪圖模型看得懂的 Danbooru 英文標籤
+- 顯示生成進度，可以取消
+- 保留最近生成的圖片縮圖（歷史），可放大查看
+- 18+ 標籤預設隱藏，需要手動開啟
+- 常用標籤會自動學習，下次更容易找到
+- 圖片反推（WD14）是**選用功能**，預設不包含
 
 ## 系統需求
 
 - Windows 桌面環境（建議 Windows 10 / 11）
 - **Python 3.10 或更新版本**
-- **ComfyUI 必須由你自己安裝、啟動與管理**。任何安裝方式都可以，不限 Windows portable 版
+- 已安裝並可自行啟動的 ComfyUI（任何安裝方式都可以，不限 Windows portable 版）
 - 基本服務（含 `server.py`）只用 Python 標準庫，**不需 `pip install` 任何第三方套件**
-- 前端不需要 Node.js、npm、Build System 或外部 CDN；直接開瀏覽器即可
-
-> ComfyUI 本身所需的 Python／顯示卡驅動／模型，請依 ComfyUI 官方文件安裝；那些不屬於本 Repo。
+- 前端使用原生 HTML / CSS / JavaScript，**不需要 Node.js、npm 或 Build System**
 
 ## 安裝與啟動
 
-以下假設你已經自己安裝並啟動 ComfyUI，且它監聽 `127.0.0.1:8188`（ComfyUI 預設值）。這種情況不需要設定任何環境變數。
+以下假設你已經自己安裝並啟動 ComfyUI，且它監聽 `http://127.0.0.1:8188`（ComfyUI 預設值）。這種情況不需要設定任何環境變數。
 
 1. 下載或 Clone 本 Repo 到任意資料夾，例如 `C:\sid-comfyui-simple-ui`。
+
 2. 確認 Python 可以使用：
 
    ```powershell
@@ -43,219 +48,180 @@ Sid-simple-ui 是 ComfyUI 的**外部極簡生圖前端**。你把 ComfyUI 留�
    如果系統回應找不到 `python`，可改用 Windows 的 `py` 啟動器，例如 `py --version`、`py server.py`。
 
 3. 先啟動你自己的 ComfyUI，並確認它正在運行。
-4. 在 Repo 目錄執行：
+
+4. 在 Repo 目錄啟動 Sid-simple-ui：
 
    **PowerShell**
+
    ```powershell
    cd C:\sid-comfyui-simple-ui
    python server.py
    ```
 
    **CMD**
+
    ```cmd
    cd /d C:\sid-comfyui-simple-ui
    python server.py
    ```
 
-5. 開啟瀏覽器：
+5. 開啟瀏覽器：<http://127.0.0.1:7860>
 
-   <http://127.0.0.1:7860>
+6. 看到頁面後，在右欄選擇你已安裝的 Checkpoint、點幾個左邊的標籤，再按「生成」。
 
-看到頁面後，在右欄選擇你已安裝的 Checkpoint、點標籤，再按「生成」即可。停止服務時，在該終端機按 `Ctrl + C`，或直接關閉該終端機視窗。
+停止服務時，在該終端機按 `Ctrl + C`，或直接關閉該終端機視窗。
 
-### 若 ComfyUI 使用其他本機 Port
+> 如果沒有設定 `COMFY_LAUNCH_CMD`，本介面**不會**猜你的 ComfyUI 安裝在哪裡，也不會自動啟動任何程式。請自己先啟動 ComfyUI。
 
-例如 ComfyUI 在 `8189`，啟動 Sid-simple-ui 前先設定 `COMFY_URL`：
+## 如何連接自己的 ComfyUI
+
+Sid-simple-ui 預設向本機 `http://127.0.0.1:8188` 連線。如果你的 ComfyUI 在不同 Port（例如 `8189`），啟動前設定 `COMFY_URL`：
 
 **PowerShell**
+
 ```powershell
 $env:COMFY_URL = "http://127.0.0.1:8189"
 python server.py
 ```
 
 **CMD**
+
 ```cmd
 set COMFY_URL=http://127.0.0.1:8189
 python server.py
 ```
 
-環境變數只對目前終端機有效；重開視窗後需要重新設定。
+注意事項：
 
-## 環境變數
+- 只支援本機loopback 位址：`127.0.0.1` 或 `localhost`。
+- **不支援 LAN 或遠端 ComfyUI**（例如 `192.168.x.x` 或網域名稱）。
+- 只寫到位址與 Port，不要加路徑、query 或 fragment。
+- 環境變數只對目前終端機有效；重開視窗後需要重新設定。
 
-一般使用者通常只會用到前三項。全部都要在啟動 `server.py` 前設定，重啟服務後才會生效。
+## 基本操作說明
+
+1. 右欄選擇你已安裝的 Checkpoint。
+2. 左邊點標籤（建議 3～6 個），也可以用搜尋框找標籤。
+3. 必要時在「補充描述」與「負面提示詞」補充文字。
+4. 可調整尺寸、張數、步數、CFG 與種子。
+5. 按「生成」，進度會顯示在中間舞台；生成中可以取消。
+6. 完成後結果會顯示在舞台上，並加入下方歷史縮圖。點縮圖可放大查看。
+
+常用快捷鍵：
+
+| 按鍵 | 功能 |
+|---|---|
+| `Ctrl + Enter` / `Cmd + Enter` | 生成 |
+| `Esc` | 關閉視窗；生成中連按兩次才會取消 |
+| `/` | 聚焦標籤搜尋框 |
+| `?` | 顯示說明 |
+| `←` / `→` | 在放大檢視中切換上一張／下一張 |
+
+## Checkpoint 與 Workflow
+
+- Checkpoint 清單由 ComfyUI 動態提供，右欄下拉選單會列出你已安裝的模型。
+- 直接在介面選擇即可，**基本操作不需要修改 Workflow 或程式碼**。
+- 本 Repo 沒有附任何 Checkpoint 或模型，你必須自行安裝符合 ComfyUI 的模型。
+
+## 環境變數及進階設定
+
+環境變數都要在啟動 `server.py` **之前**設定，重啟服務後才會生效。
 
 | 變數 | 預設值 | 用途 | 什麼時候需要設定 |
 |---|---|---|---|
-| `COMFY_URL` | `http://127.0.0.1:8188` | 告訴 Sid-simple-ui 你的 ComfyUI 在哪裡 | ComfyUI 不在預設 8188 Port 時 |
+| `COMFY_URL` | `http://127.0.0.1:8188` | 你的 ComfyUI 在哪裡 | ComfyUI 不在預設 8188 Port 時 |
 | `COMFY_OUTPUT_DIR` | 未設定 | 刪圖與「開啟輸出資料夾」使用的目錄 | 只有你需要這兩個功能時 |
 | `SIMPLE_UI_PORT` | `7860` | 本頁面的 Port（不是 ComfyUI 的 Port） | 7860 被佔用時 |
-| `COMFY_LAUNCH_CMD` | 未設定 | 你自己啟動 ComfyUI 的完整指令（選用） | 想讓本介面代為啟動 ComfyUI 時 |
-| `SIMPLE_UI_LOG_DIR` | 見下方「資料與日誌位置」 | 診斷日誌目錄（選用） | 想改日誌存放位置時 |
-| `WD14_PY` / `WD14_WORKER` | 未設定 | EVA02 反推的 Python 與 Worker 路徑 | 自行架設 WD14 時 |
-| `WD14_VIT_PY` / `WD14_VIT_WORKER` | 未設定 | ViT v3 反推的 Python 與 Worker 路徑 | 自行架設 WD14 ViT 時 |
-| `WD14_TMP` | 見下方「資料與日誌位置」 | 反推暫存圖目錄（選用） | 想改暫存位置時 |
-
-### `COMFY_URL`
-
-- 只支援本機 loopback 位址：`127.0.0.1` 或 `localhost`。
-- 支援 `http` 與 `https`，但**不支援 LAN 或遠端 ComfyUI**（例如 `192.168.x.x` 或網域名稱會被拒絕）。
-- 必須寫到 Port 為止，不要加路徑、query 或 fragment。
-- 範例：`http://127.0.0.1:8189`、`http://localhost:8189`。
-- 設定後，介面不會再嘗試代你啟動 ComfyUI，請自行啟動它。
-- 設定格式錯誤時，`server.py` 會直接終止並印出中文說明。
-
-### `COMFY_LAUNCH_CMD`（選用，預設不啟動任何程式）
-
-- **預設沒有啟動指令**：就算沒設定 `COMFY_URL`，本介面也**不會**猜測 ComfyUI 安裝位置，不會啟動任何程式。請自行啟動你的 ComfyUI。
-- 只有當你明確設定 `COMFY_LAUNCH_CMD` 時，點「開始生圖」才會執行你指定的指令；執行的程式與參數完全來自該設定。
-- 指令寫成一個字串，含空白的路徑請用引號包住。
-
-  **PowerShell**
-  ```powershell
-  $env:COMFY_LAUNCH_CMD = '"D:\MyTools\python.exe" "D:\ComfyUI\main.py"'
-  python server.py
-  ```
-
-- 若同時設定 `COMFY_OUTPUT_DIR`，且指令中沒有 `--output-directory`，啟動時會自動附加該參數。
-- 若指令格式錯誤或程式啟動失敗，介面會顯示明確原因，不會默默改用其他路徑。
+| `COMFY_LAUNCH_CMD` | 未設定 | 由本介面代為啟動 ComfyUI 的指令 | 想使用自動啟動時 |
+| `SIMPLE_UI_LOG_DIR` | 見下方 | 診斷日誌目錄 | 想改日誌位置時 |
+| `WD14_PY` / `WD14_WORKER` | 未設定 | EVA02 反推的 Python 與 Worker | 自行架設 WD14 時 |
+| `WD14_VIT_PY` / `WD14_VIT_WORKER` | 未設定 | ViT v3 反推的 Python 與 Worker | 自行架設 WD14 ViT 時 |
+| `WD14_TMP` | 見下方 | 反推暫存圖目錄 | 想改暫存位置時 |
 
 ### `COMFY_OUTPUT_DIR`
 
 - **不是基本生圖的必要條件**。不設定也可以生圖、看圖、載入歷史。
 - 必須指向**你的 ComfyUI 實際使用的輸出資料夾**，而且該資料夾必須已存在。
-- 未設定時，「刪除圖片」與「開啟圖片資料夾」會停用；設定後才有作用。
-- 為避免刪錯圖，刪除前會比較 ComfyUI 回傳的圖片內容與本機檔案（SHA-256）；內容不一致時不會刪除，也不會移除歷史紀錄。
-- 範例：
+- 未設定時，「刪除圖片」與「開啟圖片資料夾」會停用。
+- 為避免刪錯圖，刪除前會比較 ComfyUI 回傳的圖片內容與本機檔案；內容不一致時不會刪除，也不會移除歷史紀錄。
 
-  **PowerShell**
-  ```powershell
-  $env:COMFY_OUTPUT_DIR = "C:\Users\YourName\ComfyUI\output"
-  python server.py
-  ```
-
-  **CMD**
-  ```cmd
-  set "COMFY_OUTPUT_DIR=C:\Users\YourName\ComfyUI\output"
-  python server.py
-  ```
+```powershell
+$env:COMFY_OUTPUT_DIR = "C:\Users\YourName\ComfyUI\output"
+python server.py
+```
 
 ### `SIMPLE_UI_PORT`
 
-- 預設 `7860`，這是你能開啟本頁面的 Port，不是 ComfyUI 的 Port。
-- 若 7860 已被其他程式佔用，可改設其他數字；啟動後請開啟對應網址。
-- 範例：
+預設 `7860`。若已被其他程式佔用：
 
-  **PowerShell**
+```powershell
+$env:SIMPLE_UI_PORT = "7861"
+python server.py
+```
+
+然後開啟 <http://127.0.0.1:7861>。
+
+### `COMFY_LAUNCH_CMD`（選用）
+
+- 預設未設定；本介面**不會**猜測或啟動任何 ComfyUI。
+- 只有明確設定時，當 ComfyUI 尚未連線、而介面需要代為啟動時，才會執行你指定的指令。你可以在生圖流程或狀態列觸發啟動；執行內容完全來自該設定。
+- 指令寫成一個字串，含空白的路徑請用引號包住，例如：
+
   ```powershell
-  $env:SIMPLE_UI_PORT = "7861"
+  $env:COMFY_LAUNCH_CMD = '"C:\Path\To\Python\python.exe" "C:\Path\To\ComfyUI\main.py"'
   python server.py
   ```
 
-  **CMD**
-  ```cmd
-  set SIMPLE_UI_PORT=7861
-  python server.py
-  ```
+- 若同時設定 `COMFY_OUTPUT_DIR`，且指令中沒有 `--output-directory`，啟動時會自動附加該參數。
+- 指令格式錯誤或啟動失敗時，介面會顯示明確原因。
 
-  然後開啟 <http://127.0.0.1:7861>。
+### 資料與日誌位置
 
-## Checkpoint 與 Workflow
+- 診斷日誌預設放在 `%LOCALAPPDATA%\SidSimpleUI\logs`。
+- 反推暫存圖預設放在 `%LOCALAPPDATA%\SidSimpleUI\wd14-tmp`。
+- 資料根目錄的優先順序是 `LOCALAPPDATA`、`APPDATA`、系統暫存目錄；若沒有 `LOCALAPPDATA`，會依序改用後兩者。
+- 可用 `SIMPLE_UI_LOG_DIR` / `WD14_TMP` 改成自訂的**絕對路徑**；設定無效時，WD14 會回明確錯誤，日誌會退回預設位置，兩者都不會阻止基本服務啟動。
+- 本程式只會使用上述設定的日誌與暫存目錄，不會掃描或清理其他位置的日誌及暫存資料；你自行指定的目錄仍會正常使用。
 
-- Checkpoint 清單由 ComfyUI 動態提供，右欄的下拉選單會列出你已安裝的模型。
-- 直接在 UI 選擇你想用的 Checkpoint 即可，**基本操作不需要修改 Workflow 或程式碼**。
-- 本 Repo **沒有附任何 Checkpoint 或模型**，你必須自行安裝符合 ComfyUI 的模型。
+## WD14 反推功能（選用）
 
-## WD14 反推（選用功能）
+- 基本生圖**完全不依賴 WD14**；沒有 WD14 時，所有基本功能都正常使用。
+- 公開 Repo **不包含完整的 WD14 Worker、模型與專用 Python 環境**。Clone 之後不能假設反推功能已經可用。
+- 沒有設定 WD14 相關環境變數時，反推**不會啟動任何 Worker**，也不會尋找別處的資源；按「反推標籤」會顯示「尚未安裝或未完成設定」。
+- EVA02 與 ViT v3 各自獨立；只設定其中一套，另一套仍會顯示未設定。
+- 目前尚無公開的 WD14 安裝指引；一般使用者不需要設定任何 `WD14_*` 變數，直接忽略此功能即可。
+- `WD14_TMP` 未設定時，暫存圖放在本機使用者資料目錄下，不會放在 Repo 或 ComfyUI 輸出目錄；背景清理只會刪除本程式產生且過期的暫存檔。
 
-- 基本生圖**完全不依賴 WD14**；沒有 WD14 時，本頁面所有基本功能都正常使用。
-- 公開 Repo 目前**不包含完整的 WD14 Worker、模型與專用 Python 環境**。Clone 之後不能假設反推功能已經可用。
-- 沒有設定 `WD14_PY` / `WD14_WORKER`（EVA02）或 `WD14_VIT_PY` / `WD14_VIT_WORKER`（ViT）時，反推功能**不會啟動任何 Worker**，也不會尋找別處的資源；按「反推標籤」會回「尚未安裝或未完成設定」。
-- 兩套模型各自獨立：只設定其中一套，另一套仍會顯示未設定，不會互相誤用。
-- 目前尚無公開的 WD14 安裝指引；一般使用者不需要設定任何 `WD14_*` 環境變數，直接忽略此功能即可。
-- `WD14_TMP` 未設定時，暫存圖放在本機使用者資料目錄下（見下節），不會放在 Repo、ComfyUI 輸出目錄或開發者路徑。背景清理只會刪除本程式產生且過期的暫存檔。
-
-## 資料與日誌位置
-
-- 診斷日誌預設存放在 `%LOCALAPPDATA%\SidSimpleUI\logs`（若沒有 `LOCALAPPDATA`，改用系統暫存目錄下的 `SidSimpleUI`）。
-- 反推暫存圖預設存放在 `%LOCALAPPDATA%\SidSimpleUI\wd14-tmp`。
-- 可用 `SIMPLE_UI_LOG_DIR` / `WD14_TMP` 改成自訂的**絕對路徑**；設定無效時，WD14 會回明確錯誤，日誌會退回預設位置，兩者都不會改用開發者路徑或阻止基本服務啟動。
-- 本程式不讀取、不寫入、不清理其他位置的日誌或暫存資料。
-
-## 桌面控制台
-
-Repo 內的 `ui_control.ps1`、`ui_panel.pyw`、`ui_panel.ps1` 是**開發者本機輔助工具**，不是一般使用者的安裝步驟。
-
-請不要使用它們：這些腳本含有開發者本機的路徑，且可能停止你自己的 ComfyUI 程序。公開使用請一律按照上面的 `python server.py` 流程操作。
-
-## 更新、備份與解除安裝
-
-### 更新
-
-1. 更新前先備份你自己修改過的檔案（見下）。
-2. 若是 Git clone，先看工作區狀態：
-
-   ```powershell
-   git status
-   ```
-
-3. 確認沒有未提交的修改後再拉取更新；如果有自己的修改，請先另外備份，不要直接覆蓋或捨棄。
-
-### 備份
-
-- 你自行修改過的程式碼、設定與腳本請另外保存。
-- 歷史紀錄與偏好設定存放在瀏覽器的 `localStorage`（例如 `ui.gallery`、`ui.settings`、`sel`、`combos`、`adult`）。清除瀏覽器資料會讓歷史紀錄消失，請事先留意。
-
-### 解除安裝
-
-1. 停止你自己啟動的 Sid-simple-ui 程序（在終端機按 `Ctrl + C` 或關閉該終端機）。
-2. 刪除本 Repo 的資料夾即可。
-3. **不要刪除你的 ComfyUI、模型、輸出圖片或其他資料**；它們不在本 Repo 內。
-
-## 常見錯誤
+## 常見問題與故障排除
 
 | 狀況 | 可能原因與處理 |
 |---|---|
 | 執行 `python` 顯示找不到指令 | Python 未安裝或未加入 PATH；可改用 `py server.py`，或重新安裝 Python 並勾選加入 PATH。 |
 | Port 已被佔用 | 7860 被其他程式使用；改設 `SIMPLE_UI_PORT` 並開啟對應網址。 |
 | 頁面顯示 ComfyUI 沒連線 | ComfyUI 沒啟動，或 `COMFY_URL` 指向錯誤 Port；先啟動 ComfyUI，或確認 `COMFY_URL`。 |
-| 點「開始生圖」顯示尚未設定啟動指令 | 這是正常的：本介面不會猜你的 ComfyUI 安裝位置。請先自行啟動 ComfyUI；若要代啟動，請設定 `COMFY_LAUNCH_CMD`。 |
-| 啟動時出現 `COMFY_URL 設定錯誤` | 檢查是否寫成 LAN IP、少了 Port、或含額外路徑；格式請見上方範例。 |
+| 顯示尚未設定啟動指令 | 這是正常的：本介面不會猜你的 ComfyUI 安裝位置，也不會在未設定時自動啟動。請先自行啟動 ComfyUI；若要讓介面代啟動，請設定 `COMFY_LAUNCH_CMD`。 |
+| 啟動時出現 `COMFY_URL 設定錯誤` | 檢查是否寫成 LAN IP、少了 Port、或含額外路徑。 |
 | 可以按生成，但不能刪圖 / 開資料夾 | 尚未設定有效的 `COMFY_OUTPUT_DIR`，請設定後重啟服務。 |
 | 反推標籤顯示尚未安裝 | 公開 Repo 不含 WD14 資源；基本生圖不受影響，可忽略此功能。 |
 
-## 開發驗證
+## 資料儲存、備份及解除安裝
 
-```powershell
-node --check app.js
-node --check tags.js
-node --check dict.js
-python -m py_compile server.py
-```
+### 資料儲存與備份
 
-瀏覽器：開 `http://127.0.0.1:7860/?v=N`（N 遞增以避快取），Console 0 錯誤、`document.documentElement.scrollHeight === innerHeight`。
+- 生成歷史與偏好設定存放在**瀏覽器**的儲存空間中。清除瀏覽器資料會讓歷史消失，請事先留意。
+- 圖片本身由你的 ComfyUI 輸出，不在本 Repo 內。
+- 更新前請先備份你自己修改過的檔案。若是 Git clone，可先執行 `git status` 檢查工作區；若有自己的修改，請另外備份，不要直接覆蓋或捨棄。
 
-## 設計約束（請保留）
+### 解除安裝
 
-1. 前端不得直連 `ws://127.0.0.1:8188`，進度一律走 `/ws` 隧道（`server.py` 轉發，改寫 Host/Origin）。
-2. `server.py` 靜態檔只允許白名單副檔名；新增資產類型要同步更新。
-3. `#pos` 用 `ui.extra` localStorage key，不讀舊的 `pos` key。
-4. 標籤選取沿用 `sel` / `combos` / `adult`，欄位格式不可改。
-5. 一屏不捲動：`html/body` 不該出現捲軸。
-6. hover 不可改變元素尺寸。
-7. 只用系統字（微軟正黑體），不引入外部字型/CDN。
-8. 歷史圖片存在性一律問 `/api/check`，不可用檔案系統猜。
+1. 停止你自己啟動的 Sid-simple-ui 程序（在終端機按 `Ctrl + C` 或關閉終端機）。
+2. 刪除本 Repo 的資料夾即可。
+3. **不要刪除你的 ComfyUI、模型、輸出圖片或其他資料**；它們不在本 Repo 內。
 
-## 授權
+## 授權與致謝
 
-Fair AI Public License 1.0-SD（見 `LICENSE`）。
+授權：Fair AI Public License 1.0-SD（詳見 `LICENSE`）。
 
-## 致謝
+致謝：ComfyUI、NovelAI-tag-generator（標籤格式參考）。
 
-- ComfyUI
-- NovelAI-tag-generator（標籤格式參考）
-
-## 個人筆記
-
-這是我的私人寶藏公開分享，**不接受 PR**，但 issue 歡迎討論、問問題、分享你的改法。
-如果你 fork 去做自己的版本，很開心——記得遵守授權條款。
+> 如果你是 AI Coding Agent，需要修改這個專案的程式碼，請另外閱讀 [`AGENTS.md`](AGENTS.md)。一般使用者不需要閱讀該文件。
