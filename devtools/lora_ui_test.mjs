@@ -188,8 +188,23 @@ try {
   check(initState.count === "0" && initState.empty && initState.hidden, JSON.stringify(initState));
   ok("初始：0 個 LoRA、主畫面有空狀態、視窗關閉");
 
+  // 3.5) 標題列常駐 Civitai 快捷入口（與 LoRA 清單狀態無關）
+  const findLink = await cdp.eval(`(() => {
+    const a = document.querySelector('.lora-head .lora-find-link');
+    return a ? { text: a.textContent.replace(/\\s+/g, ' ').trim(), href: a.href,
+                 target: a.target, rel: a.rel, inHead: !!a.closest('.lora-head') } : null;
+  })()`);
+  check(findLink && findLink.inHead, "標題列找不到常駐 Civitai 連結");
+  check(findLink.href === "https://civitai.com/models?types=LORA", "網址不正確：" + findLink.href);
+  check(findLink.target === "_blank", "target 不正確：" + findLink.target);
+  check(/noopener/.test(findLink.rel) && /noreferrer/.test(findLink.rel), "rel 不正確：" + findLink.rel);
+  check(findLink.text.includes("尋找 LoRA"), "連結文字不正確：" + findLink.text);
+  ok("標題列常駐入口：文字／URL／target／rel 都正確");
+
   // 4) 選擇視窗：只列 .safetensors
   await cdp.eval("document.querySelector('#btnLoraPick').click()");
+  check(await cdp.eval("document.querySelector('#loraModal').hidden === false"), "btnLoraPick 無法開啟 LoRA Modal");
+  ok("原有「選擇」按鈕仍可正常開啟 LoRA Modal");
   await waitFor(() => cdp.eval("document.querySelectorAll('#loraPickList .lora-pick').length === 2"), "LoRA 清單載入");
   const listInfo = await cdp.eval(`(() => {
     const rows = [...document.querySelectorAll('#loraPickList .lora-pick')];
@@ -437,7 +452,19 @@ try {
       setW: setBody.scrollWidth, setClientW: setBody.clientWidth,
       setH: setBody.scrollHeight, setClientH: setBody.clientHeight,
       rows: d.querySelectorAll('#loraList .lora-row').length,
-      loraOverflow: [...d.querySelectorAll('.lora-row, .lora-name')].some(el => el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflow === 'visible')
+      loraOverflow: [...d.querySelectorAll('.lora-row, .lora-name')].some(el => el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflow === 'visible'),
+      head: (() => {
+        const h = d.querySelector('.lora-head');
+        const a = h.querySelector('.lora-find-link');
+        const b = h.querySelector('#btnLoraPick');
+        const hr = h.getBoundingClientRect(), ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+        return {
+          scrollW: h.scrollWidth, clientW: h.clientWidth,
+          height: hr.height, linkH: ar.height, btnH: br.height,
+          sameRow: Math.abs(ar.top - br.top) < 2,
+          inside: ar.left >= hr.left - 1 && br.right <= hr.right + 1
+        };
+      })()
     };
     fr.remove();
     return m;
@@ -446,7 +473,11 @@ try {
   check(layout.setW <= layout.setClientW + 1, "右欄被撐寬：" + JSON.stringify(layout));
   check(layout.setH <= layout.setClientH + 1, "右欄出現不必要捲動：" + JSON.stringify(layout));
   check(layout.rows === 2 && !layout.loraOverflow, "LoRA 列排版異常：" + JSON.stringify(layout));
-  ok("版面 1920×1080（2 個 LoRA）：整頁不捲動、右欄不捲動、無橫向溢出");
+  check(layout.head.scrollW <= layout.head.clientW + 1, "標題列橫向溢出：" + JSON.stringify(layout.head));
+  check(layout.head.sameRow && layout.head.inside, "常駐連結與「選擇」未按同列排列或超出標題列：" + JSON.stringify(layout.head));
+  check(Math.abs(layout.head.linkH - layout.head.btnH) <= 1 && layout.head.height <= 32,
+        "標題列被撐高：" + JSON.stringify(layout.head));
+  ok("版面 1920×1080（2 個 LoRA）：標題列無溢出、不換行、不撐高，右欄與整頁都不捲動");
 
   // 17) 審查回歸：關閉自動加入仍保存觸發詞於快照／歷史，並可由歷史還原
   await cdp.eval("document.querySelector('#btnLoraPick').click()");
@@ -546,6 +577,15 @@ try {
   const panelText = () => cdp.eval("document.querySelector('#loraPickList').textContent");
   const waitPanel = (text, label) => waitFor(
     () => cdp.eval(`document.querySelector('#loraPickList').textContent.includes(${js(text)})`), label, 12000);
+  // 標題列連結永遠在；空狀態入口只在清單為空時出現
+  const checkHeadLink = async label => {
+    const n = await cdp.eval(`(() => ({
+      head: !!document.querySelector('.lora-head .lora-find-link'),
+      total: document.querySelectorAll('a[href="https://civitai.com/models?types=LORA"]').length
+    }))()`);
+    check(n.head, label + "：標題列常駐連結消失");
+    check(n.total === 1, label + "：非 empty 狀態不應有空狀態入口，實際 " + n.total + " 個");
+  };
 
   // A) 正常空清單（200 ok:true loras:[]）
   loraApiOverride = {
@@ -565,7 +605,12 @@ try {
         /noopener/.test(emptyInfo.rel || "") && /noreferrer/.test(emptyInfo.rel || ""),
         "Civitai 入口不正確：" + JSON.stringify(emptyInfo));
   check((emptyInfo.label || "").includes("前往 Civitai 挑選 LoRA"), "入口文案不正確：" + emptyInfo.label);
-  ok("API 正常空清單：正常空狀態 + Civitai 入口（URL / target / rel 正確），不顯示舊版推論");
+  const emptyLinks = await cdp.eval(`(() => ({
+    head: !!document.querySelector('.lora-head .lora-find-link'),
+    total: document.querySelectorAll('a[href="https://civitai.com/models?types=LORA"]').length
+  }))()`);
+  check(emptyLinks.head && emptyLinks.total === 2, "空清單時應有兩個 Civitai 入口：" + JSON.stringify(emptyLinks));
+  ok("API 正常空清單：Modal 既有入口 + 標題列常駐入口（共 2 個），不顯示舊版推論");
 
   // B) 不完整的成功回應、HTML fallback 與 invalid JSON：只能說格式不正確，不可推論版本、不可冒充空清單
   for (const [label, spec] of [
@@ -584,7 +629,8 @@ try {
     const txt = await panelText();
     check(!txt.includes("舊版"), label + " 出現舊版推論：" + txt);
     check(!txt.includes("本機還沒有角色 LoRA"), label + " 被當成正常空清單：" + txt);
-    check(!(await cdp.eval("!!document.querySelector('#loraPickList a')")), label + " 錯誤狀態不應有 Civitai 入口");
+    check(!(await cdp.eval("!!document.querySelector('#loraPickList a')")), label + " 錯誤狀態不應有空狀態入口");
+    await checkHeadLink(label);
     ok(label + "：顯示格式不正確的白話提示，不誤判版本或空清單");
   }
 
@@ -599,6 +645,7 @@ try {
   const offlineText = await panelText();
   check(offlineText.includes("狀態列") && !offlineText.includes("本機還沒有角色 LoRA"), offlineText);
   check(!offlineText.includes("舊版"), "離線訊息出現舊版推論：" + offlineText);
+  await checkHeadLink("COMFY_OFFLINE");
   ok("COMFY_OFFLINE：顯示 ComfyUI 未連線與狀態列指示，不顯示空狀態");
 
   // E) 其他 JSON 錯誤：保留後端提供的可靠訊息
@@ -608,6 +655,7 @@ try {
   };
   await reopenLora();
   await waitPanel("清單格式異常（測試自訂錯誤）", "其他 JSON 錯誤");
+  await checkHeadLink("其他 JSON 錯誤");
   ok("其他 JSON 錯誤：沿用後端錯誤碼的訊息，不被通用文案覆蓋");
 
   // F) 還原真實 API：清單、選取、權重與觸發詞仍正常，且沒有空狀態入口
