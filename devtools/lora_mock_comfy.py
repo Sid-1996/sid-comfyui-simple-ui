@@ -81,12 +81,14 @@ class Handler(BaseHTTPRequestHandler):
                                     "devices": []})
         if path == "/object_info/CheckpointLoaderSimple":
             return self._json(200, {"CheckpointLoaderSimple": {
-                "input": {"required": {"ckpt_name": [["mock-model.safetensors"]]}},
+                "input": {"required": {"ckpt_name": [["WAI-Nsfw-Illustrious-17.safetensors"]]}},
                 "output": ["MODEL", "CLIP", "VAE"],
                 "output_name": ["MODEL", "CLIP", "VAE"],
             }})
         if path == "/models/loras":
             return self._json(200, STATE["loras"])
+        if path == "/models/checkpoints":
+            return self._json(200, ["WAI-Nsfw-Illustrious-17.safetensors"])
         if path == "/view_metadata/loras":
             name = (urllib.parse.parse_qs(parts.query).get("filename") or [""])[0]
             meta = META.get(name)

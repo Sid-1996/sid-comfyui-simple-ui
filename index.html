@@ -194,6 +194,7 @@
           <div class="lora-head">
             <span class="field-label">角色 LoRA <b id="loraCount" class="lora-count">0</b></span>
             <div class="lora-head-actions">
+              <button id="btnLoraExplore" class="btn btn-ghost btn-sm lora-explore-btn" type="button" title="搜尋 Civitai 公開 LoRA">探索</button>
               <a class="lora-find-link" href="https://civitai.com/models?types=LORA" target="_blank" rel="noopener noreferrer">尋找 LoRA <span class="lora-ext-mark" aria-hidden="true">↗</span></a>
               <button id="btnLoraPick" class="btn btn-ghost btn-sm" type="button">選擇</button>
             </div>
@@ -355,6 +356,46 @@
   </div>
   <input id="revFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
 </div>
+<!-- ── LoRA 探索中心（Civitai 公開搜尋） ────────────────── -->
+<div id="exploreModal" class="modal" hidden>
+  <div class="modal-card modal-card-lg" role="dialog" aria-modal="true" aria-labelledby="exploreTitle">
+    <div class="modal-head">
+      <h2 id="exploreTitle">LoRA 探索中心</h2>
+      <button id="exploreClose" class="btn btn-ghost btn-icon" type="button" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <p id="cvCkptInfo" class="cv-ckpt-info">正在辨識目前 Checkpoint…</p>
+      <div class="cv-search-row">
+        <input id="cvSearch" type="search" placeholder="搜尋 Civitai 公開 LoRA" autocomplete="off" aria-label="搜尋 LoRA">
+        <select id="cvSort" aria-label="排序">
+          <option value="Highest Rated">最高評價</option>
+          <option value="Most Downloaded">最多下載</option>
+          <option value="Most Liked">最多喜歡</option>
+          <option value="Most Discussed">最多討論</option>
+          <option value="Most Collected">最多收藏</option>
+          <option value="Most Images">最多圖片</option>
+          <option value="Newest">最新</option>
+          <option value="Oldest">最舊</option>
+        </select>
+        <select id="cvPeriod" aria-label="時間範圍">
+          <option value="AllTime">全部時間</option>
+          <option value="Year">一年內</option>
+          <option value="Month">一個月內</option>
+          <option value="Week">一週內</option>
+          <option value="Day">今天</option>
+        </select>
+        <button id="cvGo" class="btn btn-soft btn-sm" type="button">搜尋</button>
+      </div>
+      <label class="cv-nsfw"><input id="cvNsfw" type="checkbox"> 顯示成熟內容<span class="meta">（只影響 Civitai 搜尋，不改變既有成人標籤設定）</span></label>
+      <div id="cvResults" class="cv-results"></div>
+      <div class="modal-foot">
+        <button id="cvMore" type="button" class="btn btn-ghost btn-sm" hidden>載入更多</button>
+        <button type="button" class="btn btn-ghost" data-close>關閉</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ── 角色 LoRA（本機） ───────────────────────────────── -->
 <div id="loraModal" class="modal" hidden>
   <div class="modal-card modal-card-lg" role="dialog" aria-modal="true" aria-labelledby="loraTitle">

@@ -18,6 +18,7 @@ const args = {};
 for (let i = 2; i < process.argv.length; i += 2) args[process.argv[i].replace(/^--/, "")] = process.argv[i + 1];
 const UI = args.ui || "http://127.0.0.1:7861";
 const MOCK = args.mock || "http://127.0.0.1:18188";
+const MOCKCV = args.mockcv || "http://127.0.0.1:18189";
 const CAPTURE = args.capture || path.join(os.tmpdir(), "lora-capture.jsonl");
 const CHROME = args.chrome || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const MIKU = "chars\\MockMiku.safetensors";
@@ -145,25 +146,31 @@ try {
   // 用 CDP 攔截 /api/loras，模擬正常空清單、HTML、invalid JSON、離線與其他錯誤。
   // 只影響這個隔離分頁的請求，不改后端的任何回應格式。
   let loraApiOverride = null;
+  let cvStatusOverride = null;
   let apiStatusTestsDone = false;
   cdp.on("Fetch.requestPaused", async p => {
     try {
-      if (loraApiOverride && /\/api\/loras(?:\?|$)/.test(p.request.url)) {
+      const spec = /\/api\/civitai\/status(?:\?|$)/.test(p.request.url) ? cvStatusOverride
+        : /\/api\/loras(?:\?|$)/.test(p.request.url) ? loraApiOverride : null;
+      if (spec) {
         await cdp.send("Fetch.fulfillRequest", {
           requestId: p.requestId,
-          responseCode: loraApiOverride.status || 200,
+          responseCode: spec.status || 200,
           responseHeaders: [
-            { name: "Content-Type", value: loraApiOverride.type || "application/json; charset=utf-8" },
+            { name: "Content-Type", value: spec.type || "application/json; charset=utf-8" },
             { name: "Cache-Control", value: "no-store" }
           ],
-          body: Buffer.from(loraApiOverride.body || "", "utf8").toString("base64")
+          body: Buffer.from(spec.body || "", "utf8").toString("base64")
         });
       } else {
         await cdp.send("Fetch.continueRequest", { requestId: p.requestId });
       }
     } catch (e) { /* ignore */ }
   });
-  await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "*/api/loras*", requestStage: "Request" }] });
+  await cdp.send("Fetch.enable", { patterns: [
+    { urlPattern: "*/api/loras*", requestStage: "Request" },
+    { urlPattern: "*/api/civitai/status*", requestStage: "Request" }
+  ] });
 
   // 2) 開頁並等 app 就緒
   await cdp.send("Page.navigate", { url: UI + "/?v=lora-e2e" });
@@ -673,6 +680,84 @@ try {
   await cdp.eval("document.querySelector('#loraClose2').click()");
   // 上面刻意讓 /api/loras 回 503 / 502，Chrome 會記錄資源載入失敗；這些是預期噪訊
   apiStatusTestsDone = true;
+
+  // 20) LoRA 探索中心：入口、Checkpoint 辨識、搜尋、分頁、成熟內容、切換 Checkpoint
+  await fetch(MOCKCV + "/__mock/reset", { method: "POST" });
+  check(await cdp.eval("!!document.querySelector('.lora-head-actions #btnLoraExplore')"), "探索入口不存在");
+  await cdp.eval("document.querySelector('#btnLoraExplore').click()");
+  await waitFor(() => cdp.eval("document.querySelector('#exploreModal').hidden === false"), "探索 Modal 開啟");
+  await waitFor(() => cdp.eval("document.querySelector('#cvCkptInfo').textContent.includes('Illustrious')"), "Checkpoint 辨識完成", 15000);
+  const ckptInfo = await cdp.eval("document.querySelector('#cvCkptInfo').textContent");
+  check(ckptInfo.includes("WAI-Nsfw-Illustrious-17.safetensors"), ckptInfo);
+  check(ckptInfo.includes("已精確比對檔案"), ckptInfo);
+  ok("探索中心：Checkpoint 以精確檔名＋大小辨識為 Illustrious");
+
+  await cdp.eval(`(() => {
+    const i = document.querySelector('#cvSearch');
+    i.value = 'illustrious'; i.dispatchEvent(new Event('input', {bubbles:true}));
+    document.querySelector('#cvGo').click();
+  })()`);
+  await waitFor(() => cdp.eval("document.querySelectorAll('#cvResults .cv-card').length >= 2"), "搜尋結果");
+  const groups = await cdp.eval("[...document.querySelectorAll('#cvResults .cv-group-title')].map(x => x.textContent)");
+  check(groups.length >= 2 && groups[0].includes("完全適配"), "嚴格排序沒有把完全適配放最前：" + JSON.stringify(groups));
+  check(groups.some(g => g.includes("不建議")), "不建議版本被隱藏：" + JSON.stringify(groups));
+  const badges = await cdp.eval("[...document.querySelectorAll('#cvResults .cv-badge')].map(x => x.className)");
+  check(badges.some(b => b.includes("exact")) && badges.some(b => b.includes("bad")), JSON.stringify(badges));
+  const versionLinks = await cdp.eval("[...document.querySelectorAll('#cvResults .cv-link')].map(a => [a.href, a.target, a.rel])");
+  check(versionLinks.length >= 2 && versionLinks.every(x => x[0].includes("civitai.com/models/") && x[0].includes("modelVersionId=") && x[1] === "_blank" && /noopener/.test(x[2])), JSON.stringify(versionLinks[0]));
+  ok("探索中心：版本級分類、Strict 排序、不隱藏不建議版本、版本連結正確");
+
+  await cdp.eval("document.querySelector('#cvMore').click()");
+  await waitFor(() => cdp.eval("document.querySelectorAll('#cvResults .cv-card').length >= 3"), "載入更多");
+  const allQ = await (await fetch(MOCKCV + "/__mock/all")).json();
+  check(allQ.some(x => (x.cursor || [""])[0] === "page2"), "載入更多未傳 cursor：" + JSON.stringify(allQ));
+  ok("探索中心：以 metadata.nextCursor 載入更多");
+
+  await cdp.eval(`(() => { const c = document.querySelector('#cvNsfw'); c.checked = true; c.dispatchEvent(new Event('change', {bubbles:true})); })()`);
+  await waitFor(() => cdp.eval("document.querySelectorAll('#cvResults .cv-card').length >= 2"), "成熟內容搜尋");
+  const allQ2 = await (await fetch(MOCKCV + "/__mock/all")).json();
+  check(allQ2.some(x => (x.types || [""])[0] === "LORA" && (x.nsfw || [""])[0] === "true"),
+        "成熟內容開關未讓後端帶 nsfw=true：" + JSON.stringify(allQ2));
+  ok("探索中心：成熟內容開關只影響 Civitai 搜尋（後端轉為 nsfw=true）");
+
+  await cdp.eval(`(() => {
+    const s = document.querySelector('#ckpt');
+    const o = document.createElement('option'); o.value = 'UnknownCkpt.safetensors'; s.appendChild(o);
+    s.value = 'UnknownCkpt.safetensors'; s.dispatchEvent(new Event('change', {bubbles:true}));
+  })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#cvCkptInfo').textContent.includes('基底未知')"), "切換 Checkpoint 後重新辨識", 15000);
+  await cdp.eval("document.querySelector('#cvGo').click()");
+  await waitFor(() => cdp.eval("document.querySelectorAll('#cvResults .cv-card').length >= 2"), "未知基底重新搜尋");
+  const unknownBadges = await cdp.eval("[...document.querySelectorAll('#cvResults .cv-badge')].map(x => x.className)");
+  check(!unknownBadges.some(b => b.includes("exact")), "Checkpoint 未知卻出現完全適配：" + JSON.stringify(unknownBadges));
+  ok("探索中心：切換 Checkpoint 後重新辨識，未知基底不出現完全適配");
+
+  await cdp.eval("document.querySelector('#exploreClose').click()");
+  check(await cdp.eval("document.querySelector('#exploreModal').hidden === true"), "探索 Modal 無法關閉");
+  ok("探索中心：Modal 可正常關閉，原有 LoRA 選擇按鈕不受影響");
+
+  // 21) Checkpoint 辨識錯誤（429）必須顯示原因，且不得分類為完全適配
+  cvStatusOverride = {
+    status: 200, type: "application/json; charset=utf-8",
+    body: JSON.stringify({
+      ok: true,
+      checkpoint: { name: "WAI-Nsfw-Illustrious-17.safetensors", size: 6938040682,
+                    baseModel: null, confidence: "unknown", source: null, reason: "HTTP_429" },
+      error: "Civitai 要求放慢查詢，請等一下再按「搜尋」。"
+    })
+  };
+  await cdp.eval("document.querySelector('#btnLoraExplore').click()");
+  await waitFor(() => cdp.eval("document.querySelector('#cvCkptInfo').textContent.includes('放慢查詢')"), "顯示 Checkpoint 辨識錯誤", 15000);
+  const errText = await cdp.eval("document.querySelector('#cvCkptInfo').textContent");
+  check(errText.includes("基底未知"), errText);
+  check(!errText.includes("沒有找到匹配") && !errText.includes("NO_UNIQUE_MATCH"), errText);
+  await cdp.eval("document.querySelector('#cvGo').click()");
+  await waitFor(() => cdp.eval("document.querySelectorAll('#cvResults .cv-card').length >= 2"), "錯誤狀態下搜尋");
+  const errBadges = await cdp.eval("[...document.querySelectorAll('#cvResults .cv-badge')].map(x => x.className)");
+  check(!errBadges.some(b => b.includes("exact")), "辨識錯誤時出現完全適配：" + JSON.stringify(errBadges));
+  ok("探索中心：Checkpoint 辨識錯誤顯示實際原因，且所有分類維持保守");
+  cvStatusOverride = null;
+  await cdp.eval("document.querySelector('#exploreClose').click()");
 
   const errs = consoleErrors();
   check(errs.length === 0, "Console 有錯誤：" + JSON.stringify(errs));

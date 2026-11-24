@@ -11,6 +11,7 @@
 import base64
 import hashlib
 import http.server
+import importlib
 import json
 import mimetypes
 import os
@@ -27,6 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from decimal import Decimal, InvalidOperation
 
 def _parse_comfy_url(raw):
     """解析 COMFY_URL；只允許本機 loopback。回傳 (base, host, port, scheme, external)。"""
@@ -477,6 +479,345 @@ def fetch_lora_meta(name, base=None):
     if meta is None:
         return None, "NO_METADATA", 404
     return meta, "", 200
+
+
+# ── LoRA 探索中心：Civitai 公開搜尋（唯讀，全部由後端代發）──────────
+# 公開端點不需要 Token；本模組也不接受、不保存任何 Token。
+# CIVITAI_API 可用環境變數覆寫，僅供隔離測試指向本機 mock；正式值為官方 API。
+CIVITAI_API = os.environ.get("CIVITAI_API", "https://civitai.com/api/v1").rstrip("/")
+CIVITAI_TIMEOUT = 15
+CIVITAI_PAGE_LIMIT = 20
+CHECKPOINT_SEARCH_PAGES = 3
+CIVITAI_SORTS = {
+    "Highest Rated", "Most Downloaded", "Most Liked", "Most Discussed",
+    "Most Collected", "Most Images", "Newest", "Oldest",
+}
+CIVITAI_PERIODS = {"AllTime", "Year", "Month", "Week", "Day"}
+
+_civitai_cache = {}
+_cache_lock = threading.Lock()
+_folder_paths_mod = None
+_folder_paths_checked = False
+
+
+def _cache_get(key):
+    with _cache_lock:
+        hit = _civitai_cache.get(key)
+        if hit is None:
+            return None
+        if hit[0] < time.time():
+            _civitai_cache.pop(key, None)
+            return None
+        return hit[1]
+
+
+def _cache_set(key, value, ttl=300):
+    with _cache_lock:
+        if len(_civitai_cache) > 300:
+            _civitai_cache.clear()
+        _civitai_cache[key] = (time.time() + ttl, value)
+
+
+def _civitai_get(path, timeout=CIVITAI_TIMEOUT):
+    """回 (obj, code, retry_after)。code：'' / HTTP_xxx / UNREACHABLE / BAD_JSON。"""
+    req = urllib.request.Request(CIVITAI_API + path, headers={
+        "Accept": "application/json",
+        "User-Agent": "SidSimpleUI/1.0 (local; public read-only)",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read() or b"{}")
+        except Exception:
+            body = {}
+        retry = e.headers.get("Retry-After")
+        return body or {}, "HTTP_%d" % e.code, retry
+    except Exception:
+        return None, "UNREACHABLE", None
+    try:
+        return json.loads(raw), "", None
+    except Exception:
+        return None, "BAD_JSON", None
+
+
+def _as_int(value):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
+def _normalize_civitai_item(raw):
+    """只保留 UI 需要的欄位；不回傳 description HTML / images / token。"""
+    if not isinstance(raw, dict) or not isinstance(raw.get("id"), int):
+        return None
+    versions = []
+    for v in (raw.get("modelVersions") or [])[:30]:
+        if not isinstance(v, dict) or not isinstance(v.get("id"), int):
+            continue
+        files = []
+        for f in (v.get("files") or [])[:8]:
+            if not isinstance(f, dict):
+                continue
+            hashes = f.get("hashes") if isinstance(f.get("hashes"), dict) else {}
+            meta = f.get("metadata") if isinstance(f.get("metadata"), dict) else {}
+            files.append({
+                "name": str(f.get("name") or "")[:300],
+                "sizeKB": _as_int(f.get("sizeKB")),
+                "format": str(meta.get("format") or "")[:40],
+                "primary": bool(f.get("primary")),
+                "sha256": str(hashes.get("SHA256") or "")[:64],
+                "downloadUrl": str(f.get("downloadUrl") or "")[:500],
+            })
+        base = v.get("baseModel")
+        btype = v.get("baseModelType")
+        versions.append({
+            "id": v["id"],
+            "name": str(v.get("name") or "")[:200],
+            "baseModel": str(base)[:80] if isinstance(base, str) and base.strip() else None,
+            "baseModelType": str(btype)[:40] if isinstance(btype, str) and btype.strip() else None,
+            "trainedWords": [str(x)[:200] for x in (v.get("trainedWords") or [])[:30]
+                             if isinstance(x, (str, int, float)) and not isinstance(x, bool)],
+            "files": files,
+            "downloadUrl": str(v.get("downloadUrl") or "")[:500],
+        })
+    if not versions:
+        return None
+    stats = raw.get("stats") if isinstance(raw.get("stats"), dict) else {}
+    creator = raw.get("creator") if isinstance(raw.get("creator"), dict) else {}
+    return {
+        "modelId": raw["id"],
+        "name": str(raw.get("name") or "")[:200],
+        "type": str(raw.get("type") or "")[:40],
+        "creator": str(creator.get("username") or "")[:100],
+        "nsfw": bool(raw.get("nsfw")),
+        "nsfwLevel": _as_int(raw.get("nsfwLevel")),
+        "modelBaseModels": [str(x)[:80] for x in (raw.get("baseModels") or [])[:12] if isinstance(x, str)],
+        "stats": {"downloadCount": _as_int(stats.get("downloadCount")),
+                  "thumbsUpCount": _as_int(stats.get("thumbsUpCount"))},
+        "versions": versions,
+        "url": "https://civitai.com/models/%d" % raw["id"],
+    }
+
+
+def civitai_search(query, sort="Highest Rated", period="AllTime", nsfw=False, cursor=""):
+    """回 (items, next_cursor, code, retry_after)。"""
+    if not isinstance(query, str) or not query.strip() or len(query.strip()) > 200:
+        return [], None, "BAD_QUERY", None
+    if sort not in CIVITAI_SORTS or period not in CIVITAI_PERIODS:
+        return [], None, "BAD_PARAMS", None
+    if cursor and (not isinstance(cursor, str) or len(cursor) > 200):
+        return [], None, "BAD_PARAMS", None
+    params = {
+        "types": "LORA", "query": query.strip(), "limit": CIVITAI_PAGE_LIMIT,
+        "sort": sort, "period": period, "nsfw": "true" if nsfw else "false",
+    }
+    if cursor:
+        params["cursor"] = cursor
+    key = "search|" + urllib.parse.urlencode(params)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached[0], cached[1], "", None
+    path = "/models?" + urllib.parse.urlencode(params)
+    obj, code, retry = _civitai_get(path)
+    if code:
+        return [], None, code, retry
+    if not isinstance(obj, dict) or not isinstance(obj.get("items"), list):
+        return [], None, "BAD_JSON", None
+    items = [x for x in (_normalize_civitai_item(i) for i in obj["items"]) if x]
+    meta = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+    nxt = meta.get("nextCursor")
+    nxt = str(nxt) if isinstance(nxt, str) and nxt else None
+    _cache_set(key, (items, nxt), ttl=300)
+    return items, nxt, "", None
+
+
+def _checkpoint_name_ok(name):
+    if not isinstance(name, str):
+        return False
+    s = name.strip()
+    if not s or len(s) > 512 or "\0" in s:
+        return False
+    if s[0] in ("/", "\\") or re.match(r"^[A-Za-z]:", s):
+        return False
+    if any(seg in ("", "..") for seg in re.split(r"[\\/]+", s)):
+        return False
+    return True
+
+
+def _local_checkpoint_size(name):
+    """用「實際執行中的 Python」往上一層級找 ComfyUI/folder_paths.py，
+    讓 ComfyUI 自己解析 models 目錄（含 extra_model_paths.yaml）。
+    只取得檔案大小，不讀取模型內容。找不到就回 None（未知）。"""
+    global _folder_paths_mod, _folder_paths_checked
+    if not _checkpoint_name_ok(name):
+        return None
+    if not _folder_paths_checked:
+        _folder_paths_checked = True
+        try:
+            base = os.path.dirname(os.path.realpath(sys.executable))
+            for _ in range(4):
+                root = os.path.join(base, "ComfyUI")
+                if os.path.isfile(os.path.join(root, "folder_paths.py")):
+                    sys.path.insert(0, root)
+                    try:
+                        _folder_paths_mod = importlib.import_module("folder_paths")
+                    finally:
+                        try:
+                            sys.path.remove(root)
+                        except ValueError:
+                            pass
+                    break
+                if os.path.isfile(os.path.join(base, "folder_paths.py")):
+                    sys.path.insert(0, base)
+                    try:
+                        _folder_paths_mod = importlib.import_module("folder_paths")
+                    finally:
+                        try:
+                            sys.path.remove(base)
+                        except ValueError:
+                            pass
+                    break
+                parent = os.path.dirname(base)
+                if parent == base:
+                    break
+                base = parent
+        except Exception:
+            _folder_paths_mod = None
+    if _folder_paths_mod is None:
+        return None
+    try:
+        path = _folder_paths_mod.get_full_path("checkpoints", name)
+        if not path or not os.path.isfile(path):
+            return None
+        return os.path.getsize(path)
+    except Exception:
+        return None
+
+
+def _size_matches(size_kb, size_bytes):
+    """用 Decimal 比對 Civitai 的 sizeKB 與本機 byte 數，避免浮點誤差。"""
+    try:
+        kb = Decimal(str(size_kb))
+        if not kb.is_finite() or kb <= 0:
+            return False
+        return int((kb * 1024).to_integral_value()) == int(size_bytes)
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+
+
+def match_checkpoint_version(candidates, name, size_bytes):
+    """檢查候選版本的 files[]；只有檔名與大小都完全符合且唯一才回版本資料。"""
+    hits = []
+    for item in candidates or []:
+        for v in (item.get("versions") or []):
+            for f in (v.get("files") or []):
+                if f.get("name") != name or not _size_matches(f.get("sizeKB"), size_bytes):
+                    continue
+                hits.append({
+                    "modelId": item.get("modelId"), "versionId": v.get("id"),
+                    "versionName": v.get("name"), "baseModel": v.get("baseModel"),
+                })
+    uniq = {}
+    for h in hits:
+        uniq[h["versionId"]] = h
+    return uniq.popitem()[1] if len(uniq) == 1 else None
+
+
+def _search_checkpoint_candidates(query):
+    """以 query 搜尋 Checkpoint，最多 CHECKPOINT_SEARCH_PAGES 頁。
+    回 (candidates, code)：code 非空白代表 API 錯誤，不可當成空結果。"""
+    params = {"types": "Checkpoint", "query": query, "nsfw": "true",
+              "limit": CIVITAI_PAGE_LIMIT}
+    cursor, candidates, tried = "", [], 0
+    while tried < CHECKPOINT_SEARCH_PAGES:
+        tried += 1
+        p = dict(params)
+        if cursor:
+            p["cursor"] = cursor
+        obj, err, _retry = _civitai_get("/models?" + urllib.parse.urlencode(p))
+        if err:
+            return [], err
+        if not isinstance(obj, dict) or not isinstance(obj.get("items"), list):
+            return [], "BAD_JSON"
+        candidates.extend([x for x in (_normalize_civitai_item(i) for i in obj["items"]) if x])
+        meta = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+        cursor = meta.get("nextCursor")
+        if not isinstance(cursor, str) or not cursor:
+            break
+    return candidates, ""
+
+
+def _merge_candidates(*groups):
+    """依 (modelId, versionId) 去重，保留第一次出現的候選。"""
+    out, seen = [], set()
+    for group in groups:
+        for item in group or []:
+            for v in (item.get("versions") or []):
+                k = (item.get("modelId"), v.get("id"))
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append({"modelId": item.get("modelId"), "versions": [v]})
+    return out
+
+
+def identify_checkpoint(name):
+    """回 {name, size, baseModel, confidence, source, reason}。失敗一律 unknown。"""
+    unknown = {"name": name, "size": None, "baseModel": None,
+               "confidence": "unknown", "source": None, "reason": ""}
+    if not _checkpoint_name_ok(name):
+        unknown["reason"] = "INVALID_NAME"
+        return unknown
+    # 先確認這個名稱確實還在 ComfyUI 的 Checkpoint 清單中
+    obj, status = _comfy_get_json("/models/checkpoints")
+    if status != "ok" or not isinstance(obj, list):
+        unknown["reason"] = "COMFY_UNAVAILABLE"
+        return unknown
+    if not any(isinstance(n, str) and n.strip().lower() == name.strip().lower() for n in obj):
+        unknown["reason"] = "CHECKPOINT_NOT_FOUND"
+        return unknown
+    size = _local_checkpoint_size(name)
+    if not size:
+        unknown["reason"] = "LOCAL_SIZE_UNAVAILABLE"
+        return unknown
+    unknown["size"] = size
+    key = "ckpt|" + name.lower() + "|" + str(size)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
+    # 第一輪：完整檔名。找到唯一精確匹配就直接使用，不再補搜。
+    candidates, err = _search_checkpoint_candidates(name)
+    if err:
+        return dict(unknown, reason=err)
+    hit = match_checkpoint_version(candidates, name, size)
+    result = _checkpoint_hit(name, size, hit) if hit else None
+    if result and result.get("confidence") == "high":
+        # 與 fallback 成功一樣寫入 900 秒快取；錯誤與不可用結果不進快取
+        _cache_set(key, result, ttl=900)
+        return result
+
+    # 第二輪：去掉副檔名補搜；合併去重後再判斷，避免漏掉標題不含檔名的作品。
+    extensionless = re.sub(r"\.(safetensors|ckpt|pt2|pt|pth|bin|sft)$", "", name, flags=re.I)
+    extra, err = _search_checkpoint_candidates(extensionless) if extensionless else ([], "")
+    if err:
+        return dict(unknown, reason=err)
+    merged = _merge_candidates(candidates, extra)
+    hit = match_checkpoint_version(merged, name, size)
+    result = _checkpoint_hit(name, size, hit) if hit else dict(unknown, reason="NO_UNIQUE_MATCH")
+    _cache_set(key, result, ttl=900)
+    return result
+
+
+def _checkpoint_hit(name, size, hit):
+    """只把有效 baseModel 當成成功。任何情況都回傳完整 dict，絕不回 None。"""
+    base = hit.get("baseModel") if isinstance(hit, dict) else None
+    if not isinstance(base, str) or not base.strip():
+        return {"name": name, "size": size, "baseModel": None,
+                "confidence": "unknown", "source": None, "reason": "BASE_MODEL_UNAVAILABLE"}
+    return {"name": name, "size": size, "baseModel": base.strip(),
+            "confidence": "high", "source": "civitai-exact-file", "reason": "",
+            "versionId": hit.get("versionId"), "versionName": hit.get("versionName")}
 
 
 def recycle(path):
@@ -991,6 +1332,10 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._loras()
         if self.path.split("?", 1)[0] == "/api/lora-meta":
             return self._lora_meta()
+        if self.path.split("?", 1)[0] == "/api/civitai/status":
+            return self._civitai_status()
+        if self.path.split("?", 1)[0] == "/api/civitai/search":
+            return self._civitai_search()
         if self.path == "/api/check":
             return self._json(405, {"error": "use POST"})
         if self.path == "/api/reverse":
@@ -1117,6 +1462,58 @@ class H(http.server.BaseHTTPRequestHandler):
                 "ok": False, "code": code,
                 "error": "讀不到模型資訊，請稍後再試一次。"})
         return self._json(200, {"ok": True, "meta": meta})
+
+    # ── LoRA 探索中心：Civitai 公開搜尋（唯讀）────────────────
+    @staticmethod
+    def _civitai_error(code, retry=None):
+        if code == "HTTP_429":
+            body = {"ok": False, "code": "CIVITAI_RATE_LIMITED",
+                    "error": "Civitai 要求放慢查詢，請等一下再按「搜尋」。"}
+            if retry:
+                body["retryAfter"] = str(retry)[:40]
+            return 429, body
+        if isinstance(code, str) and code.startswith("HTTP_5"):
+            return 502, {"ok": False, "code": "CIVITAI_SERVER_ERROR",
+                         "error": "Civitai 暫時無法回應，請稍後再試一次。"}
+        if code in ("UNREACHABLE", "TIMEOUT"):
+            return 503, {"ok": False, "code": "CIVITAI_OFFLINE",
+                         "error": "連不到 Civitai，請確認網路連線後再試一次。"}
+        return 502, {"ok": False, "code": "CIVITAI_BAD_RESPONSE",
+                     "error": "Civitai 回傳的資料格式不正確，請稍後再試一次。"}
+
+    def _civitai_status(self):
+        q = urllib.parse.urlsplit(self.path).query
+        ckpt = (urllib.parse.parse_qs(q).get("ckpt") or [""])[0]
+        if not _checkpoint_name_ok(ckpt):
+            return self._json(400, {"ok": False, "code": "CHECKPOINT_NAME_INVALID",
+                                    "error": "Checkpoint 名稱不正確，請重新選擇模型。"})
+        info = identify_checkpoint(ckpt)
+        body = {"ok": True, "checkpoint": info}
+        if info.get("reason") in ("UNREACHABLE", "BAD_JSON") or \
+                (isinstance(info.get("reason"), str) and info["reason"].startswith("HTTP_")):
+            _, err = self._civitai_error(info["reason"])
+            body["error"] = err["error"]
+        return self._json(200, body)
+
+    def _civitai_search(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        query = (q.get("q") or [""])[0]
+        sort = (q.get("sort") or ["Highest Rated"])[0]
+        period = (q.get("period") or ["AllTime"])[0]
+        nsfw = (q.get("nsfw") or ["0"])[0] in ("1", "true", "True")
+        cursor = (q.get("cursor") or [""])[0]
+        if not query.strip() or len(query.strip()) > 200:
+            return self._json(400, {"ok": False, "code": "BAD_QUERY",
+                                    "error": "請輸入 1～200 個字的搜尋關鍵字。"})
+        if sort not in CIVITAI_SORTS or period not in CIVITAI_PERIODS:
+            return self._json(400, {"ok": False, "code": "BAD_PARAMS",
+                                    "error": "排序或時間範圍不正確，請重新選擇。"})
+        items, nxt, code, retry = civitai_search(query, sort, period, nsfw, cursor)
+        if code:
+            status, body = self._civitai_error(code, retry)
+            return self._json(status, body)
+        return self._json(200, {"ok": True, "items": items,
+                                "nextCursor": nxt, "count": len(items)})
 
     # ── 檢查圖片是否還在（直接問 ComfyUI，不靠猜輸出資料夾）────────
     def _check_files(self):

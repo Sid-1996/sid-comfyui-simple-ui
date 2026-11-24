@@ -32,7 +32,13 @@
     gallery: loadJSON("ui.gallery", []),
     results: [], lbList: [], lbIndex: 0, queue: 0,
     ws: null, t0: 0, seedUsed: null,
-    loras: [], loraList: [], loraListState: "idle", loraListError: "", loraMeta: {}
+    loras: [], loraList: [], loraListState: "idle", loraListError: "", loraMeta: {},
+    civitai: {
+      ckptName: "", ckpt: null, ckptState: "idle", ckptError: "",
+      query: "", sort: "Highest Rated", period: "AllTime", nsfw: false,
+      items: [], nextCursor: null, state: "idle", error: "",
+      statusSeq: 0, searchSeq: 0, statusReq: null, searchReq: null, debounce: null
+    }
   };
   S.gallery = Array.isArray(S.gallery) ? S.gallery.slice(0, 24) : [];
 
@@ -584,6 +590,88 @@
 
   // 舊資料、損壞資料都安全回退成空清單；不動其他 localStorage key
   S.loras = loraParseState(loadJSON("ui.loras", null)).items;
+
+  /* ==== CIVITAI_CORE_START ====
+     純資料層：版本級適配分類與 Strict 排序。不碰 DOM、localStorage、網路。
+     devtools/lora_explorer_core_test.mjs 直接擷取這一段做無瀏覽器測試。  */
+  const CV_LEVELS = [
+    { key: "exact", label: "完全適配" },
+    { key: "review", label: "需要確認" },
+    { key: "unknown", label: "需要確認（未知基底）" },
+    { key: "bad", label: "不建議" }
+  ];
+
+  function cvText(v) { return String(v == null ? "" : v).trim(); }
+
+  function cvIsOtherFamily(base) {
+    return base === "pony" || base.indexOf("pony") === 0 ||
+      /^sd (1\.|2\.|3\.)/.test(base) || base.indexOf("flux") === 0;
+  }
+
+  // 回傳 {level, key, label, reason}；level 愈小愈優先
+  function cvClassify(baseModel, baseModelType, ckptBase) {
+    const base = cvText(baseModel).toLowerCase();
+    const btype = cvText(baseModelType).toLowerCase();
+    const ckpt = cvText(ckptBase);
+    if (!ckpt) return { level: 2, key: "unknown", label: "需要確認",
+      reason: "目前 Checkpoint 基底無法可靠辨識" };
+    if (!base) return { level: 2, key: "unknown", label: "需要確認",
+      reason: "這個版本沒有基底資訊" };
+    if (base === "other") return { level: 2, key: "unknown", label: "需要確認",
+      reason: "Civitai 標為 Other，無法確認基底" };
+
+    if (ckpt.toLowerCase() === "illustrious") {
+      if (base === "illustrious") {
+        if (btype === "standard") return { level: 0, key: "exact", label: "完全適配",
+          reason: "與目前 Checkpoint 同為 Illustrious / Standard" };
+        return { level: 1, key: "review", label: "需要確認",
+          reason: "同為 Illustrious，但版本類型不是 Standard" };
+      }
+      if (base === "noobai" || base.indexOf("sdxl") === 0) {
+        return { level: 1, key: "review", label: "需要確認",
+          reason: "同屬 SDXL 架構家族，但基底不同於 Illustrious" };
+      }
+      // 「不建議」清單是針對 Illustrious 驗證過的規則，不可套用到其他 Checkpoint
+      if (cvIsOtherFamily(base)) return { level: 3, key: "bad", label: "不建議",
+        reason: "與 Illustrious 不同基底系列，已有明確不建議依據" };
+      return { level: 2, key: "unknown", label: "需要確認",
+        reason: "未建立與 Illustrious 的相容性依據" };
+    }
+
+    // Checkpoint 已知但不是 Illustrious：目前沒有可靠規則可給「完全適配」
+    if (base === ckpt.toLowerCase()) return { level: 1, key: "review", label: "需要確認",
+      reason: "基底名稱相同，但尚未建立此 Checkpoint 的完全適配規則" };
+    return { level: 2, key: "unknown", label: "需要確認",
+      reason: "與目前 Checkpoint 的相容性未知" };
+  }
+
+  function cvBestVersion(versions, ckptBase) {
+    const list = Array.isArray(versions) ? versions : [];
+    if (!list.length) return cvClassify(null, null, ckptBase);
+    let best = null;
+    list.forEach(v => {
+      const c = cvClassify(v && v.baseModel, v && v.baseModelType, ckptBase);
+      if (!best || c.level < best.level) best = c;
+    });
+    return best;
+  }
+
+  // 穩定排序：同級內保留 Civitai API 的原始順序
+  function cvSortItems(items, ckptBase) {
+    return (Array.isArray(items) ? items : [])
+      .map((item, i) => ({ item, i, best: cvBestVersion(item && item.versions, ckptBase) }))
+      .sort((a, b) => (a.best.level - b.best.level) || (a.i - b.i))
+      .map(x => x.item);
+  }
+
+  function cvStatusKey(name) { return cvText(name).toLowerCase(); }
+
+  function cvVersionUrl(modelId, versionId) {
+    const m = encodeURIComponent(String(modelId == null ? "" : modelId));
+    const v = encodeURIComponent(String(versionId == null ? "" : versionId));
+    return "https://civitai.com/models/" + m + "?modelVersionId=" + v;
+  }
+  /* ==== CIVITAI_CORE_END ==== */
 
 
   async function generate() {
@@ -1724,6 +1812,240 @@
     closeDialog($("loraModal"));
   }
 
+  /* ── LoRA 探索中心（Civitai 公開搜尋）───────────────────── */
+  const CV = S.civitai;
+
+  function cvCkptName() { return $("ckpt") ? ($("ckpt").value || "") : ""; }
+
+  function cvTranslate(e) {
+    const m = String((e && e.message) || e || "");
+    if (/failed to fetch|networkerror|load failed|aborterror/i.test(m))
+      return "連不到本機生圖服務，請確認簡單生圖還開著，再按一次「搜尋」。";
+    return m || "搜尋失敗，請稍後再試一次。";
+  }
+
+  function cvAbort(which) {
+    const key = which === "status" ? "statusReq" : "searchReq";
+    try { if (CV[key]) CV[key].abort(); } catch (e) { /* ignore */ }
+    CV[key] = null;
+  }
+
+  function cvLoadStatus(force) {
+    const name = cvCkptName();
+    if (!force && CV.ckptState === "ready" && CV.ckptName === cvStatusKey(name)) return;
+    cvAbort("status");
+    const seq = ++CV.statusSeq;
+    CV.ckptName = cvStatusKey(name);
+    CV.ckptState = "loading";
+    CV.ckptError = "";
+    renderExplore();
+    if (!name) {
+      CV.ckptState = "ready";
+      CV.ckpt = { name: "", size: null, baseModel: null, confidence: "unknown", source: null, reason: "NO_CHECKPOINT" };
+      renderExplore();
+      return Promise.resolve();
+    }
+    const ctrl = new AbortController();
+    CV.statusReq = ctrl;
+    return fetch("/api/civitai/status?ckpt=" + encodeURIComponent(name),
+                 { cache: "no-store", signal: ctrl.signal })
+      .then(async r => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+        return j;
+      })
+      .then(j => {
+        if (seq !== CV.statusSeq) return;
+        CV.ckpt = j.checkpoint || null;
+        CV.ckptState = "ready";
+        CV.ckptError = j.error || "";
+        renderExplore();
+      })
+      .catch(e => {
+        if (seq !== CV.statusSeq || (e && e.name === "AbortError")) return;
+        CV.ckpt = null;
+        CV.ckptState = "error";
+        CV.ckptError = cvTranslate(e);
+        renderExplore();
+      })
+      .finally(() => { if (CV.statusReq === ctrl) CV.statusReq = null; });
+  }
+
+  function cvOnCkptChange() {
+    CV.items = [];
+    CV.nextCursor = null;
+    CV.state = "idle";
+    cvLoadStatus(true);
+    renderExplore();
+  }
+
+  function cvSearchParams(cursor) {
+    const p = new URLSearchParams();
+    p.set("q", CV.query.trim());
+    p.set("sort", CV.sort);
+    p.set("period", CV.period);
+    p.set("nsfw", CV.nsfw ? "1" : "0");
+    if (cursor) p.set("cursor", cursor);
+    return p.toString();
+  }
+
+  function cvRunSearch(reset) {
+    try { if (CV.debounce) clearTimeout(CV.debounce); } catch (e) { /* ignore */ }
+    CV.debounce = null;
+    if (!CV.query.trim()) {
+      CV.items = []; CV.nextCursor = null; CV.state = "idle"; CV.error = "";
+      renderExplore();
+      return Promise.resolve();
+    }
+    if (reset) {
+      cvAbort("search");
+      CV.items = [];
+      CV.nextCursor = null;
+      CV.state = "loading";
+      CV.error = "";
+    } else {
+      if (CV.state === "loading" || !CV.nextCursor) return Promise.resolve();
+      CV.state = "loading";
+      CV.error = "";
+    }
+    const seq = ++CV.searchSeq;
+    const cursor = reset ? "" : CV.nextCursor;
+    renderExplore();
+    const ctrl = new AbortController();
+    CV.searchReq = ctrl;
+    return fetch("/api/civitai/search?" + cvSearchParams(cursor),
+                 { cache: "no-store", signal: ctrl.signal })
+      .then(async r => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+        return j;
+      })
+      .then(j => {
+        if (seq !== CV.searchSeq) return;
+        const more = Array.isArray(j.items) ? j.items : [];
+        CV.items = reset ? more : CV.items.concat(more);
+        CV.nextCursor = j.nextCursor || null;
+        CV.state = "ready";
+        renderExplore();
+      })
+      .catch(e => {
+        if (seq !== CV.searchSeq || (e && e.name === "AbortError")) return;
+        CV.state = "error";
+        CV.error = cvTranslate(e);
+        renderExplore();
+      })
+      .finally(() => { if (CV.searchReq === ctrl) CV.searchReq = null; });
+  }
+
+  function cvQueueSearch() {
+    try { if (CV.debounce) clearTimeout(CV.debounce); } catch (e) { /* ignore */ }
+    CV.debounce = setTimeout(() => cvRunSearch(true), 280);
+  }
+
+  function cvOpenModal() {
+    cvLoadStatus(true);
+    openDialog($("exploreModal"), cvCloseModal, $("cvSearch"));
+    renderExplore();
+  }
+
+  function cvCloseModal() {
+    cvAbort("status");
+    cvAbort("search");
+    try { if (CV.debounce) clearTimeout(CV.debounce); } catch (e) { /* ignore */ }
+    CV.debounce = null;
+    closeDialog($("exploreModal"));
+  }
+
+  function cvBadge(cls) {
+    return `<span class="cv-badge ${esc(cls.key)}">${esc(cls.label)}</span>`;
+  }
+
+  function cvRenderCard(item, ckptBase) {
+    const best = cvBestVersion(item.versions, ckptBase);
+    const cls = best ? best.key : "unknown";
+    const label = CV_LEVELS.find(x => x.key === cls) || CV_LEVELS[2];
+    const stats = item.stats || {};
+    const versions = (item.versions || []).map(v => {
+      const c = cvClassify(v.baseModel, v.baseModelType, ckptBase);
+      const lv = CV_LEVELS.find(x => x.key === c.key) || CV_LEVELS[2];
+      const words = (v.trainedWords || []).slice(0, 8).join(", ");
+      const f = (v.files || []).find(x => x.primary) || (v.files || [])[0];
+      const file = f
+        ? `<div class="cv-file">${esc(f.name)} · ${esc(f.format || "未知格式")} · ${esc(Math.round(f.sizeKB || 0).toLocaleString())} KB${f.primary ? " · 主要檔" : ""}</div>`
+        : `<div class="cv-file">沒有可讀取的檔案資訊</div>`;
+      return `<div class="cv-ver">
+        <div class="cv-ver-head">${cvBadge(lv)}<b>${esc(v.name || "未命名版本")}</b></div>
+        <div class="cv-meta">基底：${esc(v.baseModel || "未知")}${v.baseModelType ? " · " + esc(v.baseModelType) : ""} · ${esc(lv.label)}</div>
+        <div class="cv-meta">${esc(c.reason || "")}</div>
+        ${words ? `<div class="cv-words">觸發詞：${esc(words)}</div>` : ""}
+        ${file}
+        <a class="cv-link" href="${esc(cvVersionUrl(item.modelId, v.id))}" target="_blank" rel="noopener noreferrer">在 Civitai 開啟這個版本 ↗</a>
+      </div>`;
+    }).join("");
+    return `<div class="cv-card" data-level="${cls}">
+      <div class="cv-card-head">
+        <div class="cv-card-title"><b>${esc(item.name || "未命名模型")}</b>
+          ${item.nsfw ? `<span class="cv-nsfw">成熟內容</span>` : ""}</div>
+        <div class="cv-meta">${esc(item.creator || "未知作者")} · 下載 ${esc(stats.downloadCount || 0)} · 喜歡 ${esc(stats.thumbsUpCount || 0)}</div>
+        ${best && best.reason ? `<div class="cv-meta">${esc(best.reason)}</div>` : ""}
+      </div>
+      <div class="cv-vers">${versions}</div>
+    </div>`;
+  }
+
+  function renderExplore() {
+    const head = $("cvCkptInfo");
+    if (head) {
+      const c = CV.ckpt;
+      if (CV.ckptState === "loading") head.textContent = "正在辨識目前 Checkpoint…";
+      else if (CV.ckptState === "error") head.textContent = "Checkpoint 辨識失敗：" + CV.ckptError;
+      else if (c && c.baseModel) head.textContent =
+        `目前 Checkpoint：${c.name} · 基底 ${c.baseModel}（${c.source === "civitai-exact-file" ? "已精確比對檔案" : "來源不明"}）`;
+      else {
+        const base = "目前 Checkpoint 基底未知；所有 LoRA 版本最高只能視為需要確認。";
+        head.textContent = CV.ckptError ? base + " 辨識失敗原因：" + CV.ckptError : base;
+      }
+    }
+    const goBtn = $("cvGo");
+    if (goBtn) goBtn.disabled = CV.state === "loading";
+    const moreBtn = $("cvMore");
+    if (moreBtn) moreBtn.hidden = !CV.nextCursor || CV.state === "loading";
+    const box = $("cvResults");
+    if (!box) return;
+    if (CV.state === "idle") {
+      box.innerHTML = `<p class="lora-empty">輸入關鍵字搜尋 Civitai 的公開 LoRA。結果會依目前 Checkpoint 的適配程度排序，但不會隱藏任何模型。</p>`;
+      return;
+    }
+    if (CV.state === "loading" && !CV.items.length) {
+      box.innerHTML = `<p class="lora-empty">正在搜尋 Civitai…</p>`;
+      return;
+    }
+    if (CV.state === "error" && !CV.items.length) {
+      box.innerHTML = `<div class="lora-error">${esc(CV.error)}
+        <div style="margin-top:6px"><button type="button" class="btn btn-ghost btn-sm" id="cvRetry">重試</button></div></div>`;
+      return;
+    }
+    if (!CV.items.length) {
+      box.innerHTML = `<p class="lora-empty">找不到符合的 LoRA。換一個關鍵字，或開啟「顯示成熟內容」再試一次。</p>`;
+      return;
+    }
+    const ckptBase = CV.ckpt && CV.ckpt.baseModel ? CV.ckpt.baseModel : null;
+    const sorted = cvSortItems(CV.items, ckptBase);
+    const groups = [[], [], [], []];
+    sorted.forEach(it => {
+      const b = cvBestVersion(it.versions, ckptBase);
+      groups[b ? b.level : 2].push(it);
+    });
+    box.innerHTML = groups.map((list, level) => {
+      if (!list.length) return "";
+      const lv = CV_LEVELS[level];
+      return `<section class="cv-group">
+        <h3 class="cv-group-title cv-lv-${lv.key}">${esc(lv.label)}（${list.length}）</h3>
+        ${list.map(it => cvRenderCard(it, ckptBase)).join("")}
+      </section>`;
+    }).join("") + (CV.error ? `<div class="lora-error" style="margin-top:10px">${esc(CV.error)}</div>` : "");
+  }
+
   function renderLoraPick() {
     const box = $("loraPickList");
     if (!box) return;
@@ -2581,7 +2903,29 @@
       try { await navigator.clipboard.writeText($("neg").value); toast("已複製負面", "ok"); }
       catch (e) { toast("複製失敗", "warn"); }
     };
-    $("ckpt").onchange = persistSettings;
+    $("ckpt").onchange = () => { persistSettings(); cvOnCkptChange(); };
+
+    // LoRA 探索中心
+    $("btnLoraExplore").onclick = cvOpenModal;
+    $("exploreClose").onclick = cvCloseModal;
+    $("exploreModal").onclick = e => {
+      if (e.target.id === "exploreModal" || e.target.closest("[data-close]")) cvCloseModal();
+    };
+    $("cvGo").onclick = () => cvRunSearch(true);
+    $("cvMore").onclick = () => cvRunSearch(false);
+    $("cvSearch").addEventListener("input", () => {
+      CV.query = $("cvSearch").value;
+      cvQueueSearch();
+    });
+    $("cvSearch").addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); cvRunSearch(true); }
+    });
+    $("cvSort").onchange = () => { CV.sort = $("cvSort").value; cvRunSearch(true); };
+    $("cvPeriod").onchange = () => { CV.period = $("cvPeriod").value; cvRunSearch(true); };
+    $("cvNsfw").onchange = () => { CV.nsfw = !!$("cvNsfw").checked; cvRunSearch(true); };
+    $("cvResults").addEventListener("click", e => {
+      if (e.target && e.target.id === "cvRetry") cvRunSearch(true);
+    });
 
     // 角色 LoRA：選取清單在主畫面，搜尋／觸發詞在視窗
     renderLoraSelected();
