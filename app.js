@@ -31,7 +31,8 @@
     settings: Object.assign({}, DEFAULTS, loadJSON("ui.settings", {})),
     gallery: loadJSON("ui.gallery", []),
     results: [], lbList: [], lbIndex: 0, queue: 0,
-    ws: null, t0: 0, seedUsed: null
+    ws: null, t0: 0, seedUsed: null,
+    loras: [], loraList: [], loraListState: "idle", loraListError: "", loraMeta: {}
   };
   S.gallery = Array.isArray(S.gallery) ? S.gallery.slice(0, 24) : [];
 
@@ -300,7 +301,8 @@
   function composePrompt() {
     const base = window.Tags.buildPrompt();
     const q = S.settings.quality ? QUALITY : "";
-    return (q + base).replace(/^[,\s]+|[,\s]+$/g, "");
+    const lora = loraTokensFromSnapshot(loraSnapshot(S.loras)).join(", ");
+    return [q + base, lora].filter(Boolean).join(", ").replace(/^[,\s]+|[,\s]+$/g, "");
   }
 
   // 生成前取「完整且一致」的快照：標籤狀態（深拷貝）+ 組裝好的提示詞 + 負面 + 設定
@@ -310,8 +312,13 @@
     const posEl = $("pos") || {};
     const negEl = $("neg") || {};
     const extra = window.Dict.tr(posEl.value || "").trim();
-    const pos = ((S.settings.quality ? QUALITY : "") +
-      sel.map(s => s.w === 1 ? s.t : `(${s.t}:${s.w.toFixed(1)})`).concat(extra ? [extra] : []).join(", "))
+    // LoRA 觸發詞是獨立的來源，只附加在最後；不進 sel、不覆寫使用者輸入
+    const loras = loraSnapshot(S.loras);
+    const loraTokens = loraTokensFromSnapshot(loras);
+    const parts = sel.map(s => s.w === 1 ? s.t : `(${s.t}:${s.w.toFixed(1)})`);
+    if (extra) parts.push(extra);
+    parts.push(...loraTokens);
+    const pos = ((S.settings.quality ? QUALITY : "") + parts.join(", "))
       .replace(/^[,\s]+|[,\s]+$/g, "");
     return {
       sel,
@@ -324,7 +331,9 @@
       n: S.settings.n,
       steps: Number($("steps").value) || 25,
       cfg: Number($("cfg").value) || 6,
-      seed: readSeed()
+      seed: readSeed(),
+      loras,
+      loraTokens
     };
   }
 
@@ -366,8 +375,198 @@
     syncExtraFromStorage();
   }
 
-  function wf(o) {
+  /* ==== LORA_CORE_START ====
+     純資料層：不碰 DOM、localStorage、網路。
+     devtools/lora_core_test.mjs 直接擷取這一段做無瀏覽器測試。  */
+  const LORA_VERSION = 1;
+  const LORA_DEFAULT_WEIGHT = 0.8;     // 角色 LoRA 常見起始值；兩個 strength 共用
+  const LORA_UI_MIN = -2;
+  const LORA_UI_MAX = 2;
+  const LORA_LIMIT = 100;              // ComfyUI LoraLoader 的節點上限（-100～100）
+  const LORA_MAX_TRIGGERS = 40;
+  const LORA_EXT = ".safetensors";
+
+  // 觸發詞比對：大小寫、底線、多餘空白都視為同一個
+  function loraNorm(s) {
+    return String(s == null ? "" : s).toLowerCase().trim().replace(/[_\s]+/g, " ");
+  }
+
+  // 非數值一律回預設；超過節點極限才夾住，不把合理範圍限死
+  function loraWeight(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return LORA_DEFAULT_WEIGHT;
+    return Math.round(Math.max(-LORA_LIMIT, Math.min(LORA_LIMIT, n)) * 100) / 100;
+  }
+
+  // ComfyUI 的相對名稱（可含子資料夾）。只做格式檢查，不碰檔案系統。
+  function loraNameOk(name) {
+    if (typeof name !== "string") return false;
+    const s = name.trim();
+    if (!s || s.length > 512 || s.indexOf("\0") >= 0) return false;
+    if (s.charAt(0) === "/" || s.charAt(0) === "\\" || /^[a-zA-Z]:/.test(s)) return false;
+    if (s.split(/[\\/]+/).some(seg => seg === "" || seg === "..")) return false;
+    return s.toLowerCase().endsWith(LORA_EXT);
+  }
+
+  function loraDisplay(name) {
+    const base = String(name || "").split(/[\\/]/).pop() || "";
+    return base.replace(/\.safetensors$/i, "") || base;
+  }
+
+  function loraSub(name) {
+    const parts = String(name || "").split(/[\\/]/);
+    parts.pop();
+    return parts.join(" / ");
+  }
+
+  function loraCleanTriggers(list) {
+    const out = [], seen = new Set();
+    (Array.isArray(list) ? list : []).forEach(raw => {
+      const t = String(raw == null ? "" : raw).replace(/[\r\n]+/g, " ").trim();
+      if (!t || t.length > 200) return;
+      const k = loraNorm(t);
+      if (!k || seen.has(k)) return;
+      seen.add(k);
+      out.push(t);
+    });
+    return out.slice(0, LORA_MAX_TRIGGERS);
+  }
+
+  // 讀入（可能是舊版／損壞的）ui.loras；單筆壞掉只跳過該筆
+  function loraParseItems(raw) {
+    const src = raw && typeof raw === "object" && Array.isArray(raw.items) ? raw.items : [];
+    const out = [], seen = new Set();
+    src.forEach(it => {
+      if (!it || typeof it !== "object") return;
+      const name = typeof it.name === "string" ? it.name.trim() : "";
+      if (!loraNameOk(name) || seen.has(name.toLowerCase())) return;
+      seen.add(name.toLowerCase());
+      out.push({
+        name,
+        display: typeof it.display === "string" && it.display.trim()
+          ? it.display.trim().slice(0, 200) : loraDisplay(name),
+        strength: loraWeight(it.strength),
+        triggers: loraCleanTriggers(it.triggers),
+        autoTrigger: it.autoTrigger !== false,
+        enabled: it.enabled !== false
+      });
+    });
+    return out;
+  }
+
+  function loraParseState(raw) {
+    return { v: LORA_VERSION, items: loraParseItems(raw) };
+  }
+
+  function loraSerialize(items) {
     return {
+      v: LORA_VERSION,
+      items: (Array.isArray(items) ? items : []).map(it => ({
+        name: it.name,
+        display: it.display,
+        strength: loraWeight(it.strength),
+        triggers: loraCleanTriggers(it.triggers),
+        autoTrigger: !!it.autoTrigger,
+        enabled: !!it.enabled
+      }))
+    };
+  }
+
+  function loraFind(items, name) {
+    const k = String(name || "").toLowerCase();
+    return (Array.isArray(items) ? items : []).findIndex(it => it.name.toLowerCase() === k);
+  }
+
+  // 回傳新陣列；同名視為同一筆並合併欄位，不就地改動呼叫端資料
+  function loraSet(items, name, patch) {
+    const list = Array.isArray(items) ? items.slice() : [];
+    const clean = typeof name === "string" ? name.trim() : "";
+    if (!loraNameOk(clean)) return list;
+    const i = loraFind(list, clean);
+    const base = i >= 0 ? Object.assign({}, list[i]) : {
+      name: clean, display: loraDisplay(clean), strength: LORA_DEFAULT_WEIGHT,
+      triggers: [], autoTrigger: true, enabled: false
+    };
+    const p = patch && typeof patch === "object" ? patch : {};
+    if (p.display != null) base.display = String(p.display).trim().slice(0, 200) || loraDisplay(clean);
+    if (p.strength != null) base.strength = loraWeight(p.strength);
+    if (p.triggers != null) base.triggers = loraCleanTriggers(p.triggers);
+    if (p.autoTrigger != null) base.autoTrigger = !!p.autoTrigger;
+    if (p.enabled != null) base.enabled = !!p.enabled;
+    if (i >= 0) list[i] = base; else list.push(base);
+    return list;
+  }
+
+  function loraRemove(items, name) {
+    return (Array.isArray(items) ? items : []).filter(
+      it => it.name.toLowerCase() !== String(name || "").toLowerCase());
+  }
+
+  function loraEnabled(items) {
+    return (Array.isArray(items) ? items : []).filter(it => it.enabled !== false && loraNameOk(it.name));
+  }
+
+  // 本次生成要用的固定資料（順序＝使用者加入順序＝Workflow 串接順序）
+  // 職責是「完整保存設定」：即使 autoTrigger 關閉，觸發詞也要留在快照／歷史，
+  // 才能還原。要不要放進 Prompt，由 loraTokensFromSnapshot() 單獨判斷。
+  function loraSnapshot(items) {
+    return loraEnabled(items).map(it => ({
+      name: it.name,
+      display: it.display || loraDisplay(it.name),
+      strength: loraWeight(it.strength),
+      triggers: loraCleanTriggers(it.triggers),
+      autoTrigger: it.autoTrigger !== false
+    }));
+  }
+
+  // 只組合「自動加入」的 LoRA 觸發詞；跨 LoRA 去重、保持第一次出現的順序。
+  // 舊快照沒有 autoTrigger 欄位時視為啟用，維持相容。
+  function loraTokensFromSnapshot(list) {
+    const out = [], seen = new Set();
+    (Array.isArray(list) ? list : []).forEach(l => {
+      if (!l || l.autoTrigger === false) return;
+      const triggers = Array.isArray(l.triggers) ? l.triggers : [];
+      triggers.forEach(raw => {
+        const t = String(raw || "").trim();
+        const k = loraNorm(t);
+        if (!k || seen.has(k)) return;
+        seen.add(k);
+        out.push(t);
+      });
+    });
+    return out;
+  }
+
+  // 把 LoRA 鏈接進「剛建好的」Workflow；0 個時原封不動回傳，維持與舊版完全等效
+  function loraApplyToWorkflow(nodes, loras) {
+    const list = (Array.isArray(loras) ? loras : []).filter(l => l && loraNameOk(l.name));
+    if (!list.length) return nodes;
+    const ids = Object.keys(nodes).map(Number).filter(n => Number.isFinite(n));
+    let next = (ids.length ? Math.max.apply(null, ids) : 0) + 1;
+    let model = ["1", 0];   // CheckpointLoaderSimple: MODEL
+    let clip = ["1", 1];    // CheckpointLoaderSimple: CLIP
+    list.forEach(l => {
+      const id = String(next++);
+      const w = loraWeight(l.strength);
+      nodes[id] = { class_type: "LoraLoader", inputs: {
+        model,
+        clip,
+        lora_name: l.name,
+        strength_model: loraWeight(l.strengthModel == null ? w : l.strengthModel),
+        strength_clip: loraWeight(l.strengthClip == null ? w : l.strengthClip)
+      } };
+      model = [id, 0];
+      clip = [id, 1];
+    });
+    // 正面與負面共用同一條 CLIP 鏈，KSampler 用最後的 MODEL
+    nodes["2"].inputs.clip = clip;
+    nodes["3"].inputs.clip = clip;
+    nodes["5"].inputs.model = model;
+    return nodes;
+  }
+
+  function wf(o) {
+    const nodes = {
       "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: o.ckpt } },
       "2": { class_type: "CLIPTextEncode", inputs: { text: o.pos, clip: ["1", 1] } },
       "3": { class_type: "CLIPTextEncode", inputs: { text: o.neg, clip: ["1", 1] } },
@@ -379,7 +578,13 @@
       "6": { class_type: "VAEDecode", inputs: { samples: ["5", 0], vae: ["1", 2] } },
       "7": { class_type: "SaveImage", inputs: { images: ["6", 0], filename_prefix: "ui_" + o.fileTag } }
     };
+    return loraApplyToWorkflow(nodes, o.loras);
   }
+  /* ==== LORA_CORE_END ==== */
+
+  // 舊資料、損壞資料都安全回退成空清單；不動其他 localStorage key
+  S.loras = loraParseState(loadJSON("ui.loras", null)).items;
+
 
   async function generate() {
     if (S.running || S.starting) return;
@@ -401,10 +606,13 @@
     S.starting = false;
     if (!comfyOk) { syncGo(); return; }
 
-    // ① 生成前同步標籤狀態（#pos 由 snapshotNow 直接讀 DOM，不從 storage 覆蓋）
+    // ① 選了 LoRA 就先確認它還在本機清單中；無效模型不可靜默略過
+    if (!(await verifySelectedLoras())) { syncGo(); return; }
+
+    // ② 生成前同步標籤狀態（#pos 由 snapshotNow 直接讀 DOM，不從 storage 覆蓋）
     if (window.Tags && typeof window.Tags.syncFromStorage === "function") window.Tags.syncFromStorage();
 
-    // ② 取快照（標籤狀態、提示詞、負面、設定一次進）——之後請求與紀錄同源
+    // ③ 取快照（標籤狀態、提示詞、負面、設定、LoRA 一次進）——之後請求與紀錄同源
     const snap = snapshotNow();
     const genId = "G" + (++genSeq) + "-" + Date.now().toString(36);
     // 檔名專用 tag：ComfyUI 用「目前目錄最大編號 + 1」產生檔名，刪除最新版後
@@ -432,13 +640,14 @@
       ckpt, pos: snap.pos, neg: snap.neg,
       w, h, n: snap.n, seed,
       steps: snap.steps, cfg: snap.cfg,
-      fileTag
+      fileTag,
+      loras: snap.loras
     };
     const selSnap = snap.sel;
     const extraSnap = snap.extraRaw;
     const negSnap = snap.neg.trim();
 
-    logGen("snapshot", { genId, posLen: snap.pos.length, negLen: snap.neg.length, posHash: hashStr(snap.pos), seed, steps: snap.steps, cfg: snap.cfg, tags: snap.sel.map(s => s.t) });
+    logGen("snapshot", { genId, posLen: snap.pos.length, negLen: snap.neg.length, posHash: hashStr(snap.pos), seed, steps: snap.steps, cfg: snap.cfg, tags: snap.sel.map(s => s.t), loras: snap.loras.map(l => l.name + "@" + l.strength) });
 
     S.running = true;
     S.cancelled = false;
@@ -499,6 +708,7 @@
         extra: extraSnap,
         neg: negSnap,
         prompt: o.pos,
+        loras: snap.loras,
         at: Date.now()
       }));
 
@@ -746,6 +956,17 @@
     $("pos").value = it.extra || "";
     try { localStorage.setItem("ui.extra", $("pos").value); } catch (e) { /* ignore */ }
     if (it.neg) { $("neg").value = it.neg; persistSettings(); }
+    // 新紀錄只要有 loras 欄位就要完整還原；空陣列表示該次生成沒有用 LoRA，
+    // 必須清空目前角色。舊紀錄完全沒有這個欄位時才保持目前選擇。
+    if (Array.isArray(it.loras)) {
+      S.loras = loraParseItems({ items: it.loras.map(l => ({
+        name: l.name, display: l.display, strength: l.strength,
+        triggers: l.triggers, autoTrigger: l.autoTrigger, enabled: true
+      })) });
+      loraSave();
+      renderLoraSelected();
+      renderLoraPick();
+    }
     updateWarn();
     toast("已套用這張圖的提示詞", "ok");
   }
@@ -997,7 +1218,7 @@
     CA.it = it;
     CA.cats = new Set(); CA.checked = new Set(); CA.candidates = []; CA.overrides = new Map();
     CA.extraMode = "keep"; CA.role = false; CA.presetKey = "";
-    openModal("分類套用", "");
+    openModal("按分類替換提示詞", "");
     caRender();
     const first = $("modalBody").querySelector('[data-ca="preset"]');
     if (first) { try { first.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
@@ -1041,7 +1262,11 @@
     }).join("");
     const curPos = ($("pos") && $("pos").value) || "";
     const histExtra = CA.it.extra || "";
-    const extraRadios = [["keep", "保留目前（推薦）"], ["replace", "取代為這張圖的文字"], ["merge", "合併兩邊（去重）"]]
+    const extraRadios = [
+      ["keep", "保留目前的補充描述（推薦）"],
+      ["replace", "改用這張歷史圖片的補充描述"],
+      ["merge", "合併目前與歷史圖片的補充描述（自動去重）"]
+    ]
       .map(o => '<label><input type="radio" name="caExtra" data-ca="extra" data-mode="' + o[0] + '"' +
         (CA.extraMode === o[0] ? " checked" : "") + "> " + esc(o[1]) + "</label>").join(" ");
     const extraText = CA.extraMode === "keep" ? "" :
@@ -1055,25 +1280,25 @@
       ? "套用（移除 " + plan.stats.removeCount + " · 加入 " + plan.stats.addCount + "）"
       : (hasExtraChange ? "套用補充描述" : "套用（移除 0 · 加入 0）");
     body.innerHTML =
-      '<p class="meta">以這張歷史圖片為底，將選取分類替換成目前提示詞的內容；未選取分類保持不變。</p>' +
-      "<h3>快速替換（只會先開啟預覽，不會直接寫入）</h3>" +
+      '<p class="meta">以這張歷史圖片為基底。選取分類後，歷史圖片中相同分類的標籤會由目前提示詞的內容取代；沒有選取的分類會保留歷史圖片原本的內容。</p>' +
+      "<h3>快速替換（先預覽，確認後才會套用）</h3>" +
       '<div class="rev-modes">' + quickHtml + "</div>" +
-      "<h3>分類（可多選）</h3>" +
+      "<h3>選擇要替換的分類（可多選）</h3>" +
       '<div class="rev-cats">' + catHtml + "</div>" +
       '<div class="rev-grid">' +
-        '<div class="rev-left"><div class="rev-group-head"><h3>會移除（這張圖）</h3><b id="caRemoveCount">' +
+        '<div class="rev-left"><div class="rev-group-head"><h3>歷史圖片中將被替換的標籤</h3><b id="caRemoveCount">' +
         plan.stats.removeCount + "</b></div>" +
         '<div id="caRemoveList" class="rev-tags">' + (removeCandidates.length ? removeCandidates.map(chip).join("") : '<span class="rev-empty">尚無</span>') + "</div>" +
-        '<p class="meta">歷史標籤會被目前同分類標籤取代。</p></div>' +
-        '<div class="rev-right"><div class="rev-group-head"><h3>會加入（目前）</h3><b id="caAddCount">' +
+        '<p class="meta">這些標籤原本屬於歷史圖片，套用後會由目前提示詞中相同分類的標籤取代。</p></div>' +
+        '<div class="rev-right"><div class="rev-group-head"><h3>將從目前提示詞帶入的標籤</h3><b id="caAddCount">' +
         plan.stats.addCount + "</b></div>" +
         '<div id="caAddList" class="rev-tags">' + (addCandidates.length ? addCandidates.map(chip).join("") : '<span class="rev-empty">尚無</span>') + "</div>" +
-        '<p class="meta">⚠ 表示需要你確認；角色專屬服裝與表情不會自動帶入。</p></div>' +
+        '<p class="meta">這些標籤會從目前提示詞帶入，取代歷史圖片中選取分類的內容。⚠ 表示需要你確認；角色專屬服裝與表情不會自動帶入。</p></div>' +
       "</div>" +
       "<h3>補充描述</h3>" +
       '<div class="rev-rating">' + extraRadios + "</div>" +
-      '<p class="meta">目前：' + esc(curPos || "（空的）") + "</p>" +
-      '<p class="meta">這張圖：' + esc(histExtra || "（空的）") + "</p>" +
+      '<p class="meta">目前提示詞：' + esc(curPos || "（空的）") + "</p>" +
+      '<p class="meta">歷史圖片：' + esc(histExtra || "（空的）") + "</p>" +
       extraText +
       hint +
       '<div class="modal-foot">' +
@@ -1281,8 +1506,10 @@
   function showPromptModal() {
     const p = composePrompt();
     const neg = $("neg").value.trim();
+    const loras = loraSnapshot(S.loras);
     openModal("完整提示詞", `
       <p class="meta" style="margin-bottom:8px">這就是真正送進模型的內容（正面 ${p.split(",").filter(x => x.trim()).length} 個標籤）。</p>
+      ${loras.length ? `<p class="meta" style="margin-bottom:8px">角色 LoRA：${loras.map(l => esc(l.display) + " × " + l.strength.toFixed(2)).join("、")}</p>` : ""}
       <div class="prompt-box">${p ? esc(p) : "（空的）"}</div>
       ${neg ? `<h3>負面提示詞</h3><div class="prompt-box">${esc(neg)}</div>` : ""}
       <div class="modal-foot">
@@ -1298,6 +1525,432 @@
         toast("複製失敗，請手動選取", "warn");
       }
     };
+  }
+
+  /* ── 角色 LoRA：選取、權重、觸發詞 ─────────────────────── */
+  const LORA = { filter: "", active: null, editing: -1 };
+  let loraListReq = null;
+
+  function loraItem(name) {
+    const i = loraFind(S.loras, name);
+    return i >= 0 ? S.loras[i] : null;
+  }
+
+  function loraInfo(name) {
+    const k = String(name || "").toLowerCase();
+    return S.loraList.find(x => x.name.toLowerCase() === k) || null;
+  }
+
+  function loraSave() {
+    saveJSON("ui.loras", loraSerialize(S.loras));
+  }
+
+  // 清單還沒載入時不亂標「找不到」，避免 ComfyUI 暫時離線就嚇使用者
+  function loraAvailable(name) {
+    if (S.loraListState !== "ready") return true;
+    return !!loraInfo(name);
+  }
+
+  function translateLoraError(e) {
+    const m = String((e && e.message) || e || "");
+    if (/failed to fetch|networkerror|load failed|aborterror/i.test(m))
+      return "無法連到本機生圖服務，請確認 simple_ui 還開著，再按「重新整理」。";
+    return m || "讀不到 LoRA 清單，請稍後再按「重新整理」。";
+  }
+
+  // API 資料格式統一的白話訊息（HTML、invalid JSON、缺欄位或型別錯誤都用它）
+  const LORA_FORMAT_ERROR = "目前無法讀取 LoRA 清單，生圖服務回傳的資料格式不正確。請重新整理；如果持續發生，請重新啟動生圖介面後再試。";
+
+  // 不是 JSON 就只說「格式不正確」：HTML fallback 只能證明回應不是預期 JSON，
+  // 不能證明是「服務版本過舊」（可能是代理、錯誤頁或其他路由回應）。
+  async function loraReadJSON(r) {
+    const text = await r.text();
+    try { return JSON.parse(text); }
+    catch (e) { throw new Error(LORA_FORMAT_ERROR); }
+  }
+
+  function loraSubLabel(name) {
+    return loraSub(name) || "根目錄";
+  }
+
+  function renderLoraSelected() {
+    const box = $("loraList");
+    if (!box) return;
+    const items = loraEnabled(S.loras);
+    const count = $("loraCount");
+    if (count) count.textContent = String(items.length);
+    if (!items.length) {
+      box.innerHTML = `<p class="lora-empty">還沒套用角色。按上面的「選擇」加入本機 LoRA。</p>`;
+      return;
+    }
+    box.innerHTML = items.map(it => {
+      const miss = !loraAvailable(it.name);
+      const note = miss
+        ? `<span class="lora-note bad">本機已找不到這個模型，生成前請移除</span>`
+        : `<span class="lora-note">${it.autoTrigger ? "觸發詞" : "觸發詞（不自動加入）"} ${it.triggers.length}</span>`;
+      return `<div class="lora-row${miss ? " missing" : ""}" data-name="${esc(it.name)}">
+        <div class="lora-row-top">
+          <span class="lora-name" title="${esc(it.name)}">${esc(it.display)}</span>
+          <button type="button" class="lora-x" data-lora-act="remove" title="移除這個角色" aria-label="移除 ${esc(it.display)}">×</button>
+        </div>
+        <span class="lora-sub" title="${esc(it.name)}">${esc(loraSubLabel(it.name))}</span>
+        <div class="lora-row-ctl">
+          <input type="range" min="${LORA_UI_MIN}" max="${LORA_UI_MAX}" step="0.05" value="${esc(it.strength)}" data-lora-act="strength" aria-label="${esc(it.display)} 權重">
+          <input type="number" class="lora-num" min="${-LORA_LIMIT}" max="${LORA_LIMIT}" step="0.05" value="${esc(it.strength.toFixed(2))}" data-lora-act="strength-num" aria-label="${esc(it.display)} 權重數值">
+        </div>
+        ${note}
+      </div>`;
+    }).join("");
+  }
+
+  function loraOnListInput(e) {
+    const act = e.target && e.target.dataset ? e.target.dataset.loraAct : "";
+    if (act !== "strength" && act !== "strength-num") return;
+    const row = e.target.closest(".lora-row");
+    if (!row) return;
+    const v = loraWeight(e.target.value);
+    if (act === "strength") {
+      const num = row.querySelector('[data-lora-act="strength-num"]');
+      if (num) num.value = v.toFixed(2);
+    } else {
+      const rng = row.querySelector('[data-lora-act="strength"]');
+      if (rng) rng.value = String(Math.max(LORA_UI_MIN, Math.min(LORA_UI_MAX, v)));
+    }
+    S.loras = loraSet(S.loras, row.dataset.name, { strength: v });
+  }
+
+  function loraOnListChange(e) {
+    const act = e.target && e.target.dataset ? e.target.dataset.loraAct : "";
+    if (act === "strength" || act === "strength-num") loraSave();
+  }
+
+  function loraOnListClick(e) {
+    const btn = e.target.closest('[data-lora-act="remove"]');
+    if (!btn) return;
+    const row = btn.closest(".lora-row");
+    if (!row) return;
+    const name = row.dataset.name;
+    // 移除＝停用並保留權重／觸發詞，之後重新加入不用重設
+    S.loras = loraSet(S.loras, name, { enabled: false });
+    if (LORA.active && LORA.active.toLowerCase() === name.toLowerCase()) {
+      LORA.active = null;
+      LORA.editing = -1;
+    }
+    loraSave();
+    renderLoraSelected();
+    renderLoraPick();
+    renderLoraTriggers();
+    toast("已移除角色；你手動輸入的描述沒有被改動", "ok", 3200);
+  }
+
+  // 取最新清單；force=true 時即使已載入也重取。回傳 Promise<boolean>
+  function refreshLoraList(force) {
+    if (loraListReq) return loraListReq;
+    if (!force && S.loraListState === "ready") return Promise.resolve(true);
+    S.loraListState = "loading";
+    S.loraListError = "";
+    renderLoraPick();
+    loraListReq = fetch("/api/loras", { cache: "no-store" })
+      .then(async r => {
+        const j = await loraReadJSON(r);
+        if (!r.ok || !j || typeof j !== "object" || !j.ok) {
+          // 後端有明確 code 時優先用它的白話訊息；沒有時依照 error code 給可理解的指示
+          throw new Error((j && j.error) || (j && j.code === "COMFY_OFFLINE"
+            ? "ComfyUI 沒有連線。請確認右上角狀態列顯示已連線，再按「重新整理」。"
+            : "目前無法讀取 LoRA 清單，請重新整理；如果持續發生，請重新啟動生圖介面後再試。"));
+        }
+        // 成功的回應必須有 loras 陣列；缺欄位或型別錯誤不可冒充「正常空清單」
+        if (!Array.isArray(j.loras)) throw new Error(LORA_FORMAT_ERROR);
+        const seen = new Set();
+        S.loraList = j.loras
+          .filter(x => x && loraNameOk(x.name))
+          .map(x => ({
+            name: x.name,
+            display: String(x.display || loraDisplay(x.name)),
+            sub: String(x.sub || loraSub(x.name))
+          }))
+          .filter(x => {
+            const k = x.name.toLowerCase();
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+          });
+        S.loraListState = "ready";
+        return true;
+      })
+      .catch(e => {
+        S.loraList = [];
+        S.loraListState = "error";
+        S.loraListError = translateLoraError(e);
+        return false;
+      })
+      .finally(() => {
+        loraListReq = null;
+        renderLoraSelected();
+        renderLoraPick();
+      });
+    return loraListReq;
+  }
+
+  async function verifySelectedLoras() {
+    if (!loraEnabled(S.loras).length) return true;
+    if (!(await refreshLoraList(true))) {
+      toast("讀不到 LoRA 清單。請確認 ComfyUI 已連線（右上角狀態列），再按一次生成。", "warn", 7000);
+      return false;
+    }
+    const missing = loraEnabled(S.loras).filter(l => !loraAvailable(l.name));
+    renderLoraSelected();
+    if (!missing.length) return true;
+    const names = missing.map(l => l.display || loraDisplay(l.name)).join("、");
+    toast(`找不到角色 LoRA：${names}。本機可能已刪除，請到右欄「角色 LoRA」移除後再生成。`, "err", 9000);
+    return false;
+  }
+
+  function openLoraModal() {
+    LORA.filter = "";
+    $("loraSearch").value = "";
+    if (!LORA.active) {
+      const first = loraEnabled(S.loras)[0];
+      LORA.active = first ? first.name : null;
+    }
+    renderLoraPick();
+    renderLoraTriggers();
+    openDialog($("loraModal"), closeLoraModal, $("loraSearch"));
+    refreshLoraList(true);
+  }
+
+  function closeLoraModal() {
+    LORA.editing = -1;
+    closeDialog($("loraModal"));
+  }
+
+  function renderLoraPick() {
+    const box = $("loraPickList");
+    if (!box) return;
+    const foot = $("loraFootMeta");
+    if (foot) foot.textContent = `已加入 ${loraEnabled(S.loras).length} 個 · 本機 ${S.loraList.length} 個可用`;
+    if (S.loraListState === "loading") {
+      box.innerHTML = `<p class="lora-empty">正在讀取本機 LoRA…</p>`;
+      return;
+    }
+    if (S.loraListState === "error") {
+      box.innerHTML = `<div class="lora-error">${esc(S.loraListError)}
+        <div style="margin-top:6px"><button type="button" class="btn btn-ghost btn-sm" data-lora-act="retry">重新整理</button></div></div>`;
+      return;
+    }
+    if (!S.loraList.length) {
+      // 只有「API 正常回傳空清單」才會到這裡；錯誤狀態在上面已經 return
+      box.innerHTML = `<div class="lora-empty">
+        <p>本機還沒有角色 LoRA。可以先到模型平台挑選喜歡的角色模型，再放進 ComfyUI 的 LoRA 資料夾。</p>
+        <a class="btn btn-soft btn-sm lora-ext-link" href="https://civitai.com/models?types=LORA" target="_blank" rel="noopener noreferrer">前往 Civitai 挑選 LoRA <span class="lora-ext-mark" aria-hidden="true">↗</span></a>
+        <p class="meta">這會開啟外部網站。放好模型後按下面的按鈕重新整理。</p>
+        <button type="button" class="btn btn-ghost btn-sm" data-lora-act="retry">重新整理</button>
+      </div>`;
+      return;
+    }
+    const q = LORA.filter.trim().toLowerCase();
+    const list = q
+      ? S.loraList.filter(x => (x.display + " " + x.name + " " + x.sub).toLowerCase().indexOf(q) >= 0)
+      : S.loraList;
+    if (!list.length) {
+      box.innerHTML = `<p class="lora-empty">找不到符合「${esc(LORA.filter.trim())}」的 LoRA。</p>`;
+      return;
+    }
+    box.innerHTML = list.map(x => {
+      const it = loraItem(x.name);
+      const on = !!(it && it.enabled !== false);
+      return `<div class="lora-pick${on ? " on" : ""}" data-name="${esc(x.name)}">
+        <button type="button" class="lora-pick-main" data-lora-act="toggle">
+          <span class="lora-pick-name">${esc(x.display)}</span>
+          <span class="lora-pick-sub">${esc(loraSubLabel(x.name))} · 觸發詞 ${it ? it.triggers.length : 0}</span>
+        </button>
+        <span class="lora-pick-state">${on ? "已加入" : "加入"}</span>
+        <button type="button" class="btn btn-ghost btn-sm" data-lora-act="triggers">觸發詞</button>
+      </div>`;
+    }).join("");
+  }
+
+  function renderLoraTriggers(keepInput) {
+    const box = $("loraTrigPanel");
+    if (!box) return;
+    const prev = keepInput && $("loraTrigInput") ? $("loraTrigInput").value : "";
+    const it = LORA.active ? loraItem(LORA.active) : null;
+    if (!it) {
+      box.innerHTML = `<p class="lora-empty">選一個 LoRA（按右邊的「觸發詞」）就能管理它的觸發詞。</p>`;
+      return;
+    }
+    const m = S.loraMeta[it.name];
+    let metaHtml = `<p class="lora-meta">讀取模型資訊…</p>`;
+    if (m && m.state === "loading") metaHtml = `<p class="lora-meta">讀取模型資訊…</p>`;
+    else if (m && m.state === "error") metaHtml = `<p class="lora-meta">${esc(m.error || "讀不到模型資訊")}</p>`;
+    else if (m && m.state === "none") metaHtml = `<p class="lora-meta">這個模型沒有可讀取的 metadata，觸發詞請手動新增。</p>`;
+    else if (m && m.meta) {
+      const bits = [];
+      if (m.meta.architecture) bits.push(m.meta.architecture);
+      if (m.meta.networkDim) bits.push("dim " + m.meta.networkDim);
+      if (m.meta.resolution) bits.push(m.meta.resolution);
+      const sug = Array.isArray(m.meta.triggerWords) ? m.meta.triggerWords : [];
+      metaHtml = `<p class="lora-meta">${esc(bits.join(" · ") || "模型資訊")}</p>` +
+        (sug.length
+          ? `<div class="lora-sug">metadata 建議：${esc(sug.join(", "))}
+             <button type="button" class="btn btn-ghost btn-sm" data-lora-act="use-meta">帶入</button></div>`
+          : "");
+    }
+    const chips = it.triggers.length
+      ? it.triggers.map((t, i) => `<span class="lora-trig-chip">
+          <button type="button" data-lora-act="edit-trig" data-i="${i}" title="編輯">${esc(t)}</button>
+          <button type="button" data-lora-act="del-trig" data-i="${i}" title="移除" aria-label="移除 ${esc(t)}">×</button>
+        </span>`).join("")
+      : `<p class="lora-empty">還沒有觸發詞。可手動新增，或從上面的 metadata 帶入。</p>`;
+    box.innerHTML = `
+      <div class="lora-trig-head">
+        <b>${esc(it.display)}</b>
+        <span class="lora-pick-state">${it.enabled === false ? "未加入" : "已加入"}</span>
+      </div>
+      ${metaHtml}
+      <label class="switch-row">
+        <input type="checkbox" id="loraAuto" ${it.autoTrigger ? "checked" : ""}>
+        <span class="switch-ui" aria-hidden="true"></span>
+        <span class="switch-text">自動加入提示詞<small>生成時附加在描述最後面</small></span>
+      </label>
+      <div class="lora-trig-input">
+        <input id="loraTrigInput" type="text" placeholder="輸入觸發詞，逗號分隔可一次加多個" autocomplete="off">
+        <button type="button" class="btn btn-ghost btn-sm" id="loraTrigSave">${LORA.editing >= 0 ? "更新" : "新增"}</button>
+      </div>
+      <div class="lora-trig-chips">${chips}</div>
+      <p class="meta">觸發詞只影響這個角色，不會寫進你的「補充描述」；移除角色也不會刪掉你手動輸入的相同文字。</p>`;
+    if (LORA.editing >= 0 && it.triggers[LORA.editing] != null) {
+      $("loraTrigInput").value = it.triggers[LORA.editing];
+    } else if (prev) {
+      $("loraTrigInput").value = prev;
+    }
+    // 開啟面板時才抓 metadata（失敗不影響清單與手動觸發詞）
+    if (!m) loadLoraMeta(it.name);
+  }
+
+  function loadLoraMeta(name) {
+    if (!name || S.loraMeta[name]) return;
+    S.loraMeta[name] = { state: "loading" };
+    fetch("/api/lora-meta?name=" + encodeURIComponent(name), { cache: "no-store" })
+      .then(async r => {
+        const j = await loraReadJSON(r);
+        if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+        S.loraMeta[name] = j.meta
+          ? { state: "ready", meta: j.meta }
+          : { state: "none", error: j.error || "" };
+      })
+      .catch(e => { S.loraMeta[name] = { state: "error", error: translateLoraError(e) }; })
+      .finally(() => {
+        if (LORA.active === name && !$("loraModal").hidden) renderLoraTriggers(true);
+      });
+  }
+
+  function loraOnPickClick(e) {
+    const t = e.target.closest("[data-lora-act]");
+    if (!t) return;
+    const act = t.dataset.loraAct;
+    if (act === "retry") { refreshLoraList(true); return; }
+    const row = t.closest(".lora-pick");
+    if (!row) return;
+    const name = row.dataset.name;
+    if (act === "toggle") {
+      const cur = loraItem(name);
+      const on = !(cur && cur.enabled !== false);
+      const info = loraInfo(name);
+      S.loras = loraSet(S.loras, name, {
+        enabled: on,
+        display: info ? info.display : loraDisplay(name)
+      });
+      LORA.active = name;
+      LORA.editing = -1;
+      loraSave();
+      renderLoraSelected();
+      renderLoraPick();
+      renderLoraTriggers();
+    } else if (act === "triggers") {
+      LORA.active = name;
+      LORA.editing = -1;
+      renderLoraTriggers();
+    }
+  }
+
+  function loraOnPickInput() {
+    LORA.filter = $("loraSearch").value;
+    renderLoraPick();
+  }
+
+  function loraSaveTriggerInput() {
+    const it = LORA.active ? loraItem(LORA.active) : null;
+    const input = $("loraTrigInput");
+    if (!it || !input) return;
+    const parts = loraCleanTriggers(String(input.value || "").split(/[,\r\n]+/));
+    if (!parts.length) { toast("請先輸入觸發詞", "warn"); return; }
+    const next = it.triggers.slice();
+    if (LORA.editing >= 0 && LORA.editing < next.length) next.splice(LORA.editing, 1, ...parts);
+    else next.push(...parts);
+    S.loras = loraSet(S.loras, it.name, { triggers: next });
+    LORA.editing = -1;
+    loraSave();
+    renderLoraSelected();
+    renderLoraPick();
+    renderLoraTriggers();
+    toast("已更新觸發詞", "ok", 2000);
+  }
+
+  function loraOnTriggersClick(e) {
+    const t = e.target.closest("[data-lora-act]");
+    if (!t) return;
+    const it = LORA.active ? loraItem(LORA.active) : null;
+    if (!it) return;
+    const act = t.dataset.loraAct;
+    if (act === "del-trig") {
+      const next = it.triggers.slice();
+      next.splice(+t.dataset.i, 1);
+      S.loras = loraSet(S.loras, it.name, { triggers: next });
+      LORA.editing = -1;
+      loraSave();
+      renderLoraSelected();
+      renderLoraPick();
+      renderLoraTriggers();
+    } else if (act === "edit-trig") {
+      LORA.editing = +t.dataset.i;
+      renderLoraTriggers();
+      const input = $("loraTrigInput");
+      if (input) {
+        input.focus();
+        try { input.setSelectionRange(input.value.length, input.value.length); } catch (err) { /* ignore */ }
+      }
+    } else if (act === "use-meta") {
+      const m = S.loraMeta[it.name];
+      const sug = m && m.meta && Array.isArray(m.meta.triggerWords) ? m.meta.triggerWords : [];
+      if (!sug.length) return;
+      S.loras = loraSet(S.loras, it.name, { triggers: it.triggers.concat(sug) });
+      loraSave();
+      renderLoraSelected();
+      renderLoraPick();
+      renderLoraTriggers();
+      toast(`已帶入 ${sug.length} 個 metadata 觸發詞`, "ok");
+    }
+  }
+
+  function loraOnTriggersChange(e) {
+    if (!e.target || e.target.id !== "loraAuto") return;
+    const it = LORA.active ? loraItem(LORA.active) : null;
+    if (!it) return;
+    S.loras = loraSet(S.loras, it.name, { autoTrigger: e.target.checked });
+    loraSave();
+    renderLoraSelected();
+    renderLoraPick();
+  }
+
+  function loraOnTriggersKey(e) {
+    if (e.key === "Enter" && e.target && e.target.id === "loraTrigInput") {
+      e.preventDefault();
+      loraSaveTriggerInput();
+    } else if (e.key === "Escape" && LORA.editing >= 0) {
+      LORA.editing = -1;
+      renderLoraTriggers();
+    }
   }
 
   function showHelp() {
@@ -1929,6 +2582,23 @@
       catch (e) { toast("複製失敗", "warn"); }
     };
     $("ckpt").onchange = persistSettings;
+
+    // 角色 LoRA：選取清單在主畫面，搜尋／觸發詞在視窗
+    renderLoraSelected();
+    $("btnLoraPick").onclick = openLoraModal;
+    $("loraClose").onclick = closeLoraModal;
+    $("loraModal").onclick = e => { if (e.target.id === "loraModal" || e.target.closest("[data-close]")) closeLoraModal(); };
+    $("loraSearch").addEventListener("input", loraOnPickInput);
+    $("loraPickList").addEventListener("click", loraOnPickClick);
+    $("loraList").addEventListener("input", loraOnListInput);
+    $("loraList").addEventListener("change", loraOnListChange);
+    $("loraList").addEventListener("click", loraOnListClick);
+    $("loraTrigPanel").addEventListener("click", loraOnTriggersClick);
+    $("loraTrigPanel").addEventListener("change", loraOnTriggersChange);
+    $("loraTrigPanel").addEventListener("keydown", loraOnTriggersKey);
+    $("loraTrigPanel").addEventListener("click", e => {
+      if (e.target && e.target.id === "loraTrigSave") loraSaveTriggerInput();
+    });
     $("btnDice").onclick = () => {
       $("seed").value = String(Math.floor(Math.random() * 4294967295));
       persistSettings();

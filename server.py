@@ -349,6 +349,136 @@ def comfy_up():
     return port_open(COMFY_PORT, COMFY_HOST)
 
 
+# ── 角色 LoRA 清單／metadata（唯讀，全部經 ComfyUI 原生 API）──────────
+# 第一階段只支援 .safetensors：ComfyUI 另外接受 .pt/.ckpt/.bin 等 pickle 格式，
+# 但那些需要不安全反序列化才能讀 metadata，本專案不開放。
+LORA_EXT = ".safetensors"
+LORA_TRIGGER_KEYS = (
+    "modelspec.trigger_phrase", "modelspec.trigger_words",
+    "ss_trigger_words", "trigger_words", "trigger_phrase",
+)
+
+
+def _comfy_get_json(path, base=None, timeout=10):
+    """向 ComfyUI 要 JSON。回 (obj, status)：status 為 ok / HTTP_xxx / UNREACHABLE / BAD_JSON。"""
+    req = urllib.request.Request((base or COMFY) + path)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        return None, "HTTP_%d" % e.code
+    except Exception:
+        return None, "UNREACHABLE"
+    try:
+        return json.loads(raw), "ok"
+    except Exception:
+        return None, "BAD_JSON"
+
+
+def _lora_name_ok(name):
+    """ComfyUI 的相對名稱（可含子資料夾）；只做格式檢查，不碰檔案系統。"""
+    if not isinstance(name, str):
+        return False
+    s = name.strip()
+    if not s or len(s) > 512 or "\0" in s:
+        return False
+    if s[0] in ("/", "\\") or re.match(r"^[A-Za-z]:", s):
+        return False
+    if any(seg in ("", "..") for seg in re.split(r"[\\/]+", s)):
+        return False
+    return s.lower().endswith(LORA_EXT)
+
+
+def _lora_display(name):
+    base = re.split(r"[\\/]", name)[-1]
+    stem = base[:-len(LORA_EXT)] if base.lower().endswith(LORA_EXT) else base
+    return stem or base
+
+
+def _lora_sub(name):
+    parts = re.split(r"[\\/]", name)[:-1]
+    return " / ".join(parts)
+
+
+def fetch_lora_list(base=None):
+    """回 (names, code)：只留 .safetensors，個別壞資料跳過，不讓整份清單失效。"""
+    obj, status = _comfy_get_json("/models/loras", base)
+    if obj is None:
+        return [], status
+    if not isinstance(obj, list):
+        return [], "LORA_LIST_INVALID"
+    out, seen = [], set()
+    for raw in obj[:5000]:
+        if not _lora_name_ok(raw):
+            continue
+        key = raw.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(raw.strip())
+    out.sort(key=str.lower)
+    return out, ""
+
+
+def _lora_meta_extract(meta):
+    """從 safetensors __metadata__ 取可靠欄位；不猜測、不推論。"""
+    if not isinstance(meta, dict):
+        return None
+
+    def sval(key, limit=200):
+        v = meta.get(key)
+        if isinstance(v, (str, int, float)) and str(v).strip():
+            return str(v).strip()[:limit]
+        return ""
+
+    triggers, seen = [], set()
+    for key in LORA_TRIGGER_KEYS:
+        for part in re.split(r"[,\r\n]+", sval(key, 600)):
+            t = part.strip()[:200]
+            norm = re.sub(r"[_\s]+", " ", t.lower())
+            if not t or norm in seen:
+                continue
+            seen.add(norm)
+            triggers.append(t)
+            if len(triggers) >= 20:
+                break
+        if len(triggers) >= 20:
+            break
+    out = {
+        "title": sval("modelspec.title") or sval("ss_output_name"),
+        "architecture": sval("modelspec.architecture", 120) or sval("ss_base_model_version", 120),
+        "description": sval("modelspec.description", 400),
+        "networkDim": sval("ss_network_dim", 20),
+        "networkAlpha": sval("ss_network_alpha", 20),
+        "resolution": sval("modelspec.resolution", 40),
+        "triggerWords": triggers,
+    }
+    return out if any(out.values()) else None
+
+
+def fetch_lora_meta(name, base=None):
+    """只接受「目前 ComfyUI 清單裡實際存在」的名稱；回 (meta, code, status)。"""
+    if not _lora_name_ok(name):
+        return None, "LORA_NAME_INVALID", 0
+    names, code = fetch_lora_list(base)
+    if code:
+        return None, code, 0
+    match = next((n for n in names if n.lower() == name.strip().lower()), None)
+    if match is None:
+        return None, "LORA_NOT_FOUND", 0
+    q = urllib.parse.urlencode({"filename": match})
+    obj, status = _comfy_get_json("/view_metadata/loras?" + q, base)
+    if obj is None:
+        # ComfyUI 對「沒有 __metadata__」與「檔案不存在」都回 404，這裡一律視為沒有資訊
+        if status in ("HTTP_404", "HTTP_400"):
+            return None, "NO_METADATA", 404
+        return None, status, 0
+    meta = _lora_meta_extract(obj)
+    if meta is None:
+        return None, "NO_METADATA", 404
+    return meta, "", 200
+
+
 def recycle(path):
     """丟到 Windows 資源回收筒（失敗就回 False，由呼叫端決定要不要硬刪）。"""
     try:
@@ -857,6 +987,10 @@ class H(http.server.BaseHTTPRequestHandler):
                                     "external": COMFY_EXTERNAL,
                                     "output_ok": bool(OUTPUT_DIR),
                                     "output_error": _OUTPUT_ERROR})
+        if self.path == "/api/loras":
+            return self._loras()
+        if self.path.split("?", 1)[0] == "/api/lora-meta":
+            return self._lora_meta()
         if self.path == "/api/check":
             return self._json(405, {"error": "use POST"})
         if self.path == "/api/reverse":
@@ -940,6 +1074,49 @@ class H(http.server.BaseHTTPRequestHandler):
                                "或改用右欄「輸出設定」重新設定。" %
                                (err, os.path.join(DATA_DIR, _OUTPUT_FILE_NAME)))
         return self._json(200, body)
+
+    # ── 角色 LoRA 清單（唯讀；只走 ComfyUI 原生 /models/loras）────────
+    def _loras(self):
+        names, code = fetch_lora_list()
+        if code == "UNREACHABLE":
+            return self._json(503, {
+                "ok": False, "comfy": False, "code": "COMFY_OFFLINE",
+                "error": "ComfyUI 沒有連線，讀不到 LoRA 清單。請按右上角狀態列確認 ComfyUI 已啟動，再重新整理。"})
+        if code:
+            return self._json(502, {
+                "ok": False, "comfy": True, "code": code,
+                "error": "ComfyUI 回傳的 LoRA 清單格式不對，請稍後再試一次。"})
+        loras = [{"name": n, "display": _lora_display(n), "sub": _lora_sub(n)} for n in names]
+        return self._json(200, {"ok": True, "comfy": True, "count": len(loras), "loras": loras})
+
+    # ── 單一 LoRA 的 safetensors metadata（觸發詞、base model 等）────
+    def _lora_meta(self):
+        q = urllib.parse.urlsplit(self.path).query
+        name = (urllib.parse.parse_qs(q).get("name") or [""])[0]
+        if not name.strip():
+            return self._json(400, {"ok": False, "code": "LORA_NAME_INVALID",
+                                    "error": "缺少 LoRA 名稱"})
+        meta, code, status = fetch_lora_meta(name)
+        if code == "UNREACHABLE":
+            return self._json(503, {
+                "ok": False, "code": "COMFY_OFFLINE",
+                "error": "ComfyUI 沒有連線，無法讀取模型資訊。請確認 ComfyUI 已啟動。"})
+        if code == "LORA_NOT_FOUND":
+            return self._json(404, {
+                "ok": False, "code": code,
+                "error": "這個 LoRA 已不在 ComfyUI 的清單中，可能已被刪除或搬移。"})
+        if code == "LORA_NAME_INVALID":
+            return self._json(400, {
+                "ok": False, "code": code,
+                "error": "LoRA 名稱格式不正確，請從清單重新選擇。"})
+        if code == "NO_METADATA":
+            return self._json(200, {"ok": True, "meta": None, "code": code,
+                                    "error": "這個模型沒有可讀取的 metadata。"})
+        if code:
+            return self._json(502, {
+                "ok": False, "code": code,
+                "error": "讀不到模型資訊，請稍後再試一次。"})
+        return self._json(200, {"ok": True, "meta": meta})
 
     # ── 檢查圖片是否還在（直接問 ComfyUI，不靠猜輸出資料夾）────────
     def _check_files(self):

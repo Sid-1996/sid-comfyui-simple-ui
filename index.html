@@ -190,6 +190,14 @@
           <select id="ckpt"></select>
         </div>
 
+        <div class="field lora-field">
+          <div class="lora-head">
+            <span class="field-label">角色 LoRA <b id="loraCount" class="lora-count">0</b></span>
+            <button id="btnLoraPick" class="btn btn-ghost btn-sm" type="button">選擇</button>
+          </div>
+          <div id="loraList" class="lora-list"></div>
+        </div>
+
         <label class="switch-row">
           <input type="checkbox" id="q" checked>
           <span class="switch-ui" aria-hidden="true"></span>
@@ -344,6 +352,30 @@
   </div>
   <input id="revFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
 </div>
+<!-- ── 角色 LoRA（本機） ───────────────────────────────── -->
+<div id="loraModal" class="modal" hidden>
+  <div class="modal-card modal-card-lg" role="dialog" aria-modal="true" aria-labelledby="loraTitle">
+    <div class="modal-head">
+      <h2 id="loraTitle">角色 LoRA</h2>
+      <button id="loraClose" class="btn btn-ghost btn-icon" type="button" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="lora-search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg>
+        <input id="loraSearch" type="search" placeholder="搜尋本機 LoRA" autocomplete="off" aria-label="搜尋本機 LoRA">
+      </div>
+      <div class="lora-pick-grid">
+        <div id="loraPickList" class="lora-pick-list"></div>
+        <div id="loraTrigPanel" class="lora-trig-panel"></div>
+      </div>
+      <div class="modal-foot">
+        <span id="loraFootMeta" class="meta" style="margin-right:auto"></span>
+        <button type="button" class="btn btn-ghost" data-close id="loraClose2">關閉</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ── 說明 / 提示詞視窗 ─────────────────────────────── -->
 <div id="modal" class="modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">

@@ -45,7 +45,7 @@ const api = new Function("$", "esc", "window", "toast", "openModal", "closeModal
   src + "\nreturn { CA, caOpen, caOnClick, caOnChange, caOnInput, caRender, caCurrentPlan };")(
   $, esc, win,
   (m, k) => calls.toast.push([m, k]),
-  () => { calls.openModal++; els.modalBody.innerHTML = ""; },
+  title => { calls.openModal++; modalTitle = String(title || ""); els.modalBody.innerHTML = ""; },
   () => { calls.closeModal++; },
   () => { calls.closeLightbox++; },
   () => { calls.reuse++; },
@@ -54,6 +54,7 @@ const api = new Function("$", "esc", "window", "toast", "openModal", "closeModal
   { settings: settingsStub }
 );
 
+let modalTitle = "";
 let passed = 0;
 function test(name, fn) {
   try { fn(); passed++; console.log("  PASS " + name); }
@@ -66,10 +67,10 @@ test("19 預覽視窗結構：方向說明、8 快捷、10 分類、兩欄預覽
   currentSel = [{ t: "hatsune miku", w: 1 }];
   api.caOpen({ sel: [{ t: "2b (nier:automata)", w: 1 }, { t: "classroom", w: 1 }], extra: "歷史文字" });
   assert.equal(calls.openModal, 1);
-  assert.ok(html().includes("以這張歷史圖片為底"), "缺少方向說明");
+  assert.ok(html().includes("以這張歷史圖片為基底"), "缺少方向說明");
   assert.equal((html().match(/data-ca="preset"/g) || []).length, 8);
   assert.equal((html().match(/data-ca="cat"/g) || []).length, 10);
-  assert.ok(html().includes("會移除（這張圖）") && html().includes("會加入（目前）"));
+  assert.ok(html().includes("歷史圖片中將被替換的標籤") && html().includes("將從目前提示詞帶入的標籤"));
   assert.ok(html().includes("補充描述"));
 });
 
@@ -378,4 +379,46 @@ test("37 標籤與補充描述同時變更：兩者都套用", () => {
   assert.equal(JSON.stringify(settingsStub), settingsBefore);
 });
 
-console.log("\n" + passed + " / 19 UI tests passed");
+test("38 新文案：標題與替換方向以歷史圖片為基底", () => {
+  currentSel = [{ t: "hatsune miku", w: 1 }];
+  api.caOpen({ sel: [{ t: "2b (nier:automata)", w: 1 }, { t: "classroom", w: 1 }], extra: "歷史文字" });
+  assert.equal(modalTitle, "按分類替換提示詞");
+  assert.ok(html().includes("選取分類後，歷史圖片中相同分類的標籤會由目前提示詞的內容取代；沒有選取的分類會保留歷史圖片原本的內容。"));
+  assert.ok(html().includes("快速替換（先預覽，確認後才會套用）"));
+  assert.ok(html().includes("選擇要替換的分類（可多選）"));
+});
+
+test("39 新文案：左右欄方向、補充描述三選項與預覽標籤", () => {
+  currentSel = [{ t: "hatsune miku", w: 1 }];
+  api.caOpen({ sel: [{ t: "2b (nier:automata)", w: 1 }], extra: "歷史文字" });
+  click({ ca: "preset", preset: "role" });
+  const h = html();
+  assert.ok(h.includes("歷史圖片中將被替換的標籤"));
+  assert.ok(h.includes("這些標籤原本屬於歷史圖片，套用後會由目前提示詞中相同分類的標籤取代。"));
+  assert.ok(h.includes("將從目前提示詞帶入的標籤"));
+  assert.ok(h.includes("這些標籤會從目前提示詞帶入，取代歷史圖片中選取分類的內容。⚠ 表示需要你確認；角色專屬服裝與表情不會自動帶入。"));
+  assert.ok(h.includes("保留目前的補充描述（推薦）"));
+  assert.ok(h.includes("改用這張歷史圖片的補充描述"));
+  assert.ok(h.includes("合併目前與歷史圖片的補充描述（自動去重）"));
+  assert.ok(h.includes("目前提示詞：") && h.includes("歷史圖片："));
+});
+
+test("40 文案改名後 caCommit 替換方向不變：歷史標籤被目前標籤取代", () => {
+  for (const k of Object.keys(store)) delete store[k];
+  currentSel = [{ t: "standing", w: 1 }];
+  els.pos.value = "目前補充";
+  const negBefore = els.neg.value;
+  const before = calls.restore;
+  api.caOpen({ sel: [{ t: "sitting", w: 1 }], extra: "歷史補充" });
+  click({ ca: "preset", preset: "pose" });
+  const stats = api.caCurrentPlan().stats;
+  assert.ok(stats.removeCount >= 1 && stats.addCount >= 1, "仍應有移除與加入兩側");
+  click({ ca: "apply" });
+  assert.equal(calls.restore, before + 1, "仍須單次提交");
+  assert.ok(JSON.stringify(restored).includes("standing"), "目前提示詞標籤應帶入");
+  assert.ok(!JSON.stringify(restored).includes("sitting"), "歷史標籤應被移除，不是反過來");
+  assert.equal(els.neg.value, negBefore, "neg 不得變動");
+  assert.deepEqual(Object.keys(store), [], "keep 模式不寫 ui.extra");
+});
+
+console.log("\n" + passed + " UI tests passed");
