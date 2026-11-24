@@ -750,6 +750,400 @@
     toast("已套用這張圖的提示詞", "ok");
   }
 
+  /* ==== CATEGORY_APPLY_PLANNER_START ====
+     純資料層：不碰 DOM、不碰 localStorage、不呼叫 Tags.restore。
+     devtools/category_apply_test.mjs 會擷取這一段做無瀏覽器測試。  */
+  const CA_CATS = ["character", "clothing", "body", "pose", "expression",
+    "composition", "background", "style", "adult", "other"];
+
+  function caNorm(s) {
+    return String(s == null ? "" : s).toLowerCase().trim().replace(/[_\s]+/g, " ");
+  }
+  function caWeight(entry) {
+    const w = Number(entry && entry.w);
+    return Number.isFinite(w) && w > 0 ? w : 1;
+  }
+  function caInfo(entry) {
+    const t = String((entry && entry.t) || "");
+    const TC = window.TagCategories;
+    const has = !!(TC && typeof TC.has === "function" && TC.has(t));
+    const cat = has ? (TC.of(t) || "other") : "unknown";
+    return { t, key: caNorm(t), has, cat, w: caWeight(entry) };
+  }
+
+  // character 分類混了大量通用外觀特徵：這些不能被當成角色專名自動換掉。
+  const CA_GENERIC_CHAR = [
+    /^\d+\+?\s*(boy|girl|other|male|female|people|person)s?$/,
+    /\b(solo|everyone|multiple|group|couple|twins?|brothers?|sisters?|family|friends?)\b/,
+    /\b(hair|bangs|braid|ponytail|twintail|ahoge|sidelocks|hairband|hairclip)\b/,
+    /\b(eye|eyes|pupil|iris|eyelash|eyelashes|heterochromia)\b/,
+    /\b(aged?|age|young|old|child|teen|mature|adult|baby|toddler)\b/,
+    /\b(animal ears|cat ears|fox ears|rabbit ears|dog ears|tail|horns?|wings?|fang|pointy ears|antennae)\b/,
+    /\b(maid|nurse|angel|demon|elf|vampire|witch|princess|knight|idol|teacher|student|ghost|doll|robot|monster|animal|dog|cat|bird|dragon)\b/,
+    /\b(breasts?|ass|legs?|feet|collarbone|mole|scar|tattoo|skin|muscle)\b/,
+    /^(cat ?girl|catgirl|fox girl|dragon girl|rabbit girl)\b/
+  ];
+  function caIsGenericChar(t) {
+    const s = caNorm(t);
+    return CA_GENERIC_CHAR.some(re => re.test(s));
+  }
+  function caHasSeries(t) { return /\([^)]+\)/.test(String(t || "")); }
+  function caIsCrossClothing(t) {
+    const s = caNorm(t);
+    return /cosplay/.test(s) || caHasSeries(t);
+  }
+  // body 幾乎都是通用身體特徵；實測 737 筆只有 oripathy lesion (arknights)
+  // 帶明確作品識別。排除 organ/medium 等通用消歧括號，不把 crest 類當角色名。
+  const CA_GENERIC_PARENS = new Set([
+    "organ", "medium", "object", "style", "weapon", "symbol", "emblem",
+    "shape", "food", "chess", "creature", "animal", "flower", "plant",
+    "pattern", "gemstone", "cup", "company", "phrase", "character",
+    "female", "male", "bunny", "swimsuit", "casual",
+    "1st costume", "2nd costume", "first ascension", "second ascension", "third ascension"
+  ]);
+  function caIsCrossBody(t) {
+    const s = caNorm(t);
+    if (!caHasSeries(s)) return false;
+    const inner = ((s.match(/\(([^)]*)\)/) || [])[1] || "").trim();
+    return !!inner && !CA_GENERIC_PARENS.has(inner);
+  }
+  function caRoleGroup(info) {
+    if (info.cat !== "character") {
+      if (info.cat === "clothing" && caIsCrossClothing(info.t)) return "cross-clothing";
+      if (info.cat === "body" && caIsCrossBody(info.t)) return "cross-body";
+      if (info.cat === "expression") return "cross-expression";
+      return null;
+    }
+    if (caIsGenericChar(info.t)) return "generic";
+    return caHasSeries(info.t) ? "name-certain" : "name-possible";
+  }
+  function caGroupNote(group) {
+    switch (group) {
+      case "name-certain": return "角色專名（含作品名，預先勾選，可取消）";
+      case "name-possible": return "可能是角色名，也可能是通用詞，請確認";
+      case "generic": return "通用外觀特徵（髮型／眼睛／人數／年齡等，預設不換）";
+      case "cross-clothing": return "角色專屬服裝或 Cosplay，請確認是否一起換";
+      case "cross-body": return "與作品／角色相關的人物設計，請確認是否一起換";
+      case "cross-expression": return "表情可能影響角色辨識，請確認";
+      case "other": return "已分類為「其他」，需逐項確認";
+      case "unknown": return "不在分類表中的標籤，需逐項確認";
+      default: return "";
+    }
+  }
+  function caBuildCandidates(historySel, currentSel, cats, opts) {
+    const want = cats instanceof Set ? new Set(cats)
+      : new Set(Array.isArray(cats) ? cats : []);
+    // 角色模式只有在 character 仍被選取時才有效，避免與UI狀態分離。
+    const roleActive = !!(opts && opts.role) && want.has("character");
+    const out = [];
+    const seen = { history: new Set(), current: new Set() };
+    [["history", historySel], ["current", currentSel]].forEach(pair => {
+      const side = pair[0], list = pair[1];
+      (Array.isArray(list) ? list : []).forEach((entry, index) => {
+        if (!entry || typeof entry.t !== "string" || !entry.t.trim()) return;
+        const info = caInfo(entry);
+        if (!info.key || seen[side].has(info.key)) return;
+        seen[side].add(info.key);
+        const inCats = want.has(info.cat);
+        const group = caRoleGroup(info);
+        // 跨分類候選只在角色模式有效、且該分類未被使用者明確勾選時額外出現。
+        const roleCross = roleActive && !inCats && !!group && group.indexOf("cross-") === 0;
+        const needsOther = !info.has || info.cat === "other";
+        if (needsOther && !want.has("other")) return;
+        if (!inCats && !roleCross && !needsOther) return;
+        let finalGroup = group || info.cat;
+        let checked;
+        if (needsOther) {
+          finalGroup = info.has ? "other" : "unknown";
+          checked = false;
+        } else if (roleActive && !inCats && group) {
+          finalGroup = group;
+          checked = false;
+        } else if (roleActive && info.cat === "character" && group) {
+          // 角色模式內的 character 仍分層：專名預勾、通用特徵不勾。
+          finalGroup = group;
+          checked = group === "name-certain";
+        } else {
+          // 使用者明確勾選的分類（含手動加進來的 expression/clothing/body）
+          // 一律恢復一般分類的預設行為，不沿用角色模式的預設不勾選。
+          checked = true;
+        }
+        out.push({
+          id: side + ":" + info.key, side, index,
+          t: info.t, key: info.key, w: info.w, cat: info.cat, has: info.has,
+          group: finalGroup, note: caGroupNote(finalGroup), checked
+        });
+      });
+    });
+    return out;
+  }
+  function caPlanApply(historySel, currentSel, checkedIds, candidates) {
+    const checked = checkedIds instanceof Set ? checkedIds : new Set(checkedIds || []);
+    const list = Array.isArray(candidates) ? candidates : [];
+    const hist = (Array.isArray(historySel) ? historySel : [])
+      .filter(e => e && typeof e.t === "string" && e.t.trim());
+    const removeSet = new Set(), addList = [], seenAdd = new Set(), oldW = new Map();
+    list.forEach(c => {
+      if (!checked.has(c.id)) return;
+      if (c.side === "history") {
+        removeSet.add(c.key);
+        if (!oldW.has(c.key)) oldW.set(c.key, c.w);
+      } else if (!seenAdd.has(c.key)) {
+        seenAdd.add(c.key);
+        addList.push(c);
+      }
+    });
+    const addByCat = new Map();
+    addList.forEach(c => {
+      if (!addByCat.has(c.cat)) addByCat.set(c.cat, []);
+      addByCat.get(c.cat).push(c);
+    });
+    const result = [], usedCats = new Set(), addedKeys = new Set();
+    // 人工取消移除的歷史標籤仍留在結果裡：目前的同 key 標籤不得再插入一次。
+    const keepKeys = new Set(hist
+      .filter(e => !removeSet.has(caNorm(e.t)))
+      .map(e => caNorm(e.t)));
+    const pushAdds = cat => {
+      (addByCat.get(cat) || []).forEach(c => {
+        if (keepKeys.has(c.key) || result.some(x => caNorm(x.t) === c.key)) return;
+        result.push({ t: c.t, w: c.w });
+        addedKeys.add(c.key);
+      });
+      usedCats.add(cat);
+    };
+    hist.forEach(entry => {
+      const info = caInfo(entry);
+      if (addByCat.has(info.cat) && !usedCats.has(info.cat)) pushAdds(info.cat);
+      if (!removeSet.has(info.key)) result.push({ t: entry.t, w: caWeight(entry) });
+    });
+    addByCat.forEach((v, cat) => { if (!usedCats.has(cat)) pushAdds(cat); });
+    const weightChanges = [];
+    addList.forEach(c => {
+      const from = oldW.get(c.key);
+      if (from != null && Math.abs(from - c.w) > 1e-9) {
+        weightChanges.push({ t: c.t, from, to: c.w });
+      }
+    });
+    return {
+      nextSel: result,
+      remove: list.filter(c => c.side === "history" && checked.has(c.id)),
+      add: list.filter(c => c.side === "current" && checked.has(c.id) && addedKeys.has(c.key)),
+      stats: { removeCount: removeSet.size, addCount: addedKeys.size, weightChanges }
+    };
+  }
+  function caPromptTokens(text) {
+    const out = new Set();
+    String(text == null ? "" : text).split(/[,\r\n]+/).forEach(seg => {
+      let t = String(seg).trim();
+      if (!t) return;
+      const m = t.match(/^\(\s*([^()]*?)\s*\)$/);
+      if (m) t = String(m[1]).split(":")[0].trim();
+      const k = caNorm(t);
+      if (k) out.add(k);
+    });
+    return out;
+  }
+  function caMergeExtra(current, history) {
+    const base = String(current == null ? "" : current);
+    const have = caPromptTokens(base);
+    const add = [];
+    String(history == null ? "" : history).split(/[,\r\n]+/).forEach(seg => {
+      const s = String(seg).trim();
+      if (!s) return;
+      const k = caNorm(s);
+      if (k && !have.has(k)) { have.add(k); add.push(s); }
+    });
+    return add.length ? (base.trim() ? base.trim() + ", " + add.join(", ") : add.join(", ")) : base;
+  }
+  function caExtraResult(mode, current, history) {
+    if (mode === "replace") return String(history == null ? "" : history);
+    if (mode === "merge") return caMergeExtra(current, history);
+    return String(current == null ? "" : current);
+  }
+  /* ==== CATEGORY_APPLY_PLANNER_END ==== */
+
+  /* ── 分類套用：UI 狀態與渲染（預覽階段完全不碰正式狀態）── */
+  const CA = { it: null, cats: new Set(), checked: new Set(), candidates: [], overrides: new Map(), extraMode: "keep", role: false, presetKey: "" };
+  const CA_QUICK = [
+    ["role", "只換角色", ["character"], true],
+    ["clothing", "只換服裝", ["clothing"], false],
+    ["body", "只換人物設計", ["body"], false],
+    ["pose", "只換姿勢", ["pose"], false],
+    ["expression", "只換表情", ["expression"], false],
+    ["composition", "只換構圖", ["composition"], false],
+    ["background", "只換背景", ["background"], false],
+    ["style", "只換畫風", ["style"], false]
+  ];
+  function caCatName(c) {
+    const names = window.TagCategories && window.TagCategories.categories;
+    return (names && names[c]) || c;
+  }
+  function caCurrentPlan() {
+    return caPlanApply(CA.it && CA.it.sel, window.Tags.snapshot(), CA.checked, CA.candidates);
+  }
+  function caRebuild() {
+    CA.candidates = caBuildCandidates(CA.it && CA.it.sel, window.Tags.snapshot(), CA.cats, { role: CA.role });
+    // 手動勾選只是覆寫；分類或模式改變時，其餘項目一律用新的預設值。
+    CA.checked = new Set(CA.candidates
+      .filter(c => (CA.overrides.has(c.id) ? CA.overrides.get(c.id) : c.checked))
+      .map(c => c.id));
+  }
+  function caOpen(it) {
+    const TC = window.TagCategories;
+    if (!TC || typeof TC.has !== "function" || typeof TC.of !== "function" || !TC.categories) {
+      toast("分類資料沒有載入，請重新整理頁面再試；仍然可以用「用同提示詞」完整套用。", "warn", 6000);
+      return;
+    }
+    CA.it = it;
+    CA.cats = new Set(); CA.checked = new Set(); CA.candidates = []; CA.overrides = new Map();
+    CA.extraMode = "keep"; CA.role = false; CA.presetKey = "";
+    openModal("分類套用", "");
+    caRender();
+    const first = $("modalBody").querySelector('[data-ca="preset"]');
+    if (first) { try { first.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
+  }
+  function caRender() {
+    const body = $("modalBody");
+    if (!body || !CA.it) return;
+    const sc = body.scrollTop;
+    const hist = Array.isArray(CA.it.sel) ? CA.it.sel : [];
+    const cur = window.Tags.snapshot();
+    const plan = caCurrentPlan();
+    // 候選不分是否被勾選都要顯示，否則使用者無法手動選取跨分類項目。
+    const removeCandidates = CA.candidates.filter(c => c.side === "history");
+    const addCandidates = CA.candidates.filter(c => c.side === "current");
+    const countsH = {}, countsC = {};
+    hist.forEach(e => { const i = caInfo(e); countsH[i.cat] = (countsH[i.cat] || 0) + 1; });
+    cur.forEach(e => { const i = caInfo(e); countsC[i.cat] = (countsC[i.cat] || 0) + 1; });
+    const chip = c => {
+      // 即時勾選狀態只有一個來源：CA.checked。c.checked 只是建立時的預設值。
+      const checked = CA.checked.has(c.id);
+      const zh = window.Tags.tagZh(c.t);
+      const wc = plan.stats.weightChanges.find(x => x.t === c.t);
+      const weight = (c.w === 1 ? "" : " (" + c.w.toFixed(1) + ")") +
+        (wc ? " <i>" + wc.from.toFixed(1) + "→" + wc.to.toFixed(1) + "</i>" : "");
+      const ambiguous = c.group === "generic" || c.group === "name-possible" ||
+        c.group === "other" || c.group === "unknown" || c.group.indexOf("cross-") === 0;
+      const label = (ambiguous ? "⚠ " : "") + (zh ? zh + " · " + c.t : c.t) + weight;
+      return '<button type="button" class="rev-tag' + (checked ? " on" : "") +
+        (window.Tags.isAdult(c.t) ? " adult" : "") + '" data-ca="item" data-id="' + esc(c.id) +
+        '" aria-pressed="' + checked + '" title="' + esc(c.note || c.t) + '">' + esc(label) + "</button>";
+    };
+    const quickHtml = CA_QUICK.map(q =>
+      '<button type="button" class="btn btn-soft btn-sm rev-mode-btn' +
+      (CA.presetKey === q[0] ? " on" : "") + '" data-ca="preset" data-preset="' + q[0] + '">' +
+      esc(q[1]) + "</button>").join("");
+    const catHtml = CA_CATS.map(c => {
+      const note = c === "other" ? "（含未分類，需逐項確認）" : "";
+      return '<button type="button" class="rev-cat' + (CA.cats.has(c) ? " on" : "") +
+        '" data-ca="cat" data-cat="' + c + '" aria-pressed="' + CA.cats.has(c) + '">' +
+        esc(caCatName(c) + note) + "<b>圖 " + (countsH[c] || 0) + " / 現在 " + (countsC[c] || 0) + "</b></button>";
+    }).join("");
+    const curPos = ($("pos") && $("pos").value) || "";
+    const histExtra = CA.it.extra || "";
+    const extraRadios = [["keep", "保留目前（推薦）"], ["replace", "取代為這張圖的文字"], ["merge", "合併兩邊（去重）"]]
+      .map(o => '<label><input type="radio" name="caExtra" data-ca="extra" data-mode="' + o[0] + '"' +
+        (CA.extraMode === o[0] ? " checked" : "") + "> " + esc(o[1]) + "</label>").join(" ");
+    const extraText = CA.extraMode === "keep" ? "" :
+      '<textarea id="caExtraText" class="prompt-box" rows="4" aria-label="補充描述結果">' + esc(CA.extraText) + "</textarea>";
+    // 可套用與否必須同時考慮標籤與補充描述；caCommit() 早已允許只改補充描述。
+    const hasTagChanges = !!(plan.stats.removeCount || plan.stats.addCount);
+    const hasExtraChange = CA.extraMode !== "keep";
+    const canApply = hasTagChanges || hasExtraChange;
+    const hint = canApply ? "" : '<p class="meta">目前沒有可替換的項目。請先選分類，或勾選下面的候選標籤。</p>';
+    const footLabel = hasTagChanges
+      ? "套用（移除 " + plan.stats.removeCount + " · 加入 " + plan.stats.addCount + "）"
+      : (hasExtraChange ? "套用補充描述" : "套用（移除 0 · 加入 0）");
+    body.innerHTML =
+      '<p class="meta">以這張歷史圖片為底，將選取分類替換成目前提示詞的內容；未選取分類保持不變。</p>' +
+      "<h3>快速替換（只會先開啟預覽，不會直接寫入）</h3>" +
+      '<div class="rev-modes">' + quickHtml + "</div>" +
+      "<h3>分類（可多選）</h3>" +
+      '<div class="rev-cats">' + catHtml + "</div>" +
+      '<div class="rev-grid">' +
+        '<div class="rev-left"><div class="rev-group-head"><h3>會移除（這張圖）</h3><b id="caRemoveCount">' +
+        plan.stats.removeCount + "</b></div>" +
+        '<div id="caRemoveList" class="rev-tags">' + (removeCandidates.length ? removeCandidates.map(chip).join("") : '<span class="rev-empty">尚無</span>') + "</div>" +
+        '<p class="meta">歷史標籤會被目前同分類標籤取代。</p></div>' +
+        '<div class="rev-right"><div class="rev-group-head"><h3>會加入（目前）</h3><b id="caAddCount">' +
+        plan.stats.addCount + "</b></div>" +
+        '<div id="caAddList" class="rev-tags">' + (addCandidates.length ? addCandidates.map(chip).join("") : '<span class="rev-empty">尚無</span>') + "</div>" +
+        '<p class="meta">⚠ 表示需要你確認；角色專屬服裝與表情不會自動帶入。</p></div>' +
+      "</div>" +
+      "<h3>補充描述</h3>" +
+      '<div class="rev-rating">' + extraRadios + "</div>" +
+      '<p class="meta">目前：' + esc(curPos || "（空的）") + "</p>" +
+      '<p class="meta">這張圖：' + esc(histExtra || "（空的）") + "</p>" +
+      extraText +
+      hint +
+      '<div class="modal-foot">' +
+        '<button type="button" class="btn btn-ghost" data-close>取消</button>' +
+        '<button type="button" class="btn btn-soft" data-ca="full">完整套用</button>' +
+        '<button type="button" class="btn btn-primary" id="caApply" data-ca="apply"' +
+        (canApply ? "" : " disabled") + ">" + esc(footLabel) + "</button>" +
+      "</div>";
+    body.scrollTop = sc;
+  }
+  function caOnClick(e) {
+    const b = e.target.closest("[data-ca]");
+    if (!b) return;
+    const kind = b.dataset.ca;
+    if (kind === "preset") {
+      const p = CA_QUICK.find(x => x[0] === b.dataset.preset);
+      if (!p) return;
+      CA.presetKey = p[0]; CA.role = p[3]; CA.cats = new Set(p[2]); CA.overrides = new Map();
+      caRebuild(); caRender();
+    } else if (kind === "cat") {
+      const c = b.dataset.cat;
+      if (CA.cats.has(c)) CA.cats.delete(c); else CA.cats.add(c);
+      // 角色模式的有效狀態跟著 character 分類走，不留下孤立的 CA.role。
+      if (!CA.cats.has("character")) CA.role = false;
+      CA.presetKey = "";
+      caRebuild(); caRender();
+    } else if (kind === "item") {
+      const id = b.dataset.id;
+      const next = !CA.checked.has(id);
+      CA.overrides.set(id, next);
+      if (next) CA.checked.add(id); else CA.checked.delete(id);
+      caRender();
+    } else if (kind === "full") {
+      const it = CA.it;
+      closeModal(); closeLightbox();
+      if (it) reusePrompt(it);
+    } else if (kind === "apply") {
+      caCommit();
+    }
+  }
+  function caOnChange(e) {
+    const b = e.target;
+    if (!b || b.dataset.ca !== "extra") return;
+    CA.extraMode = b.dataset.mode;
+    // 文字框預填「確定後會寫入的內容」，使用者改了就以改過的為準。
+    CA.extraText = caExtraResult(CA.extraMode, ($("pos") && $("pos").value) || "", CA.it.extra || "");
+    caRender();
+  }
+  function caOnInput(e) {
+    if (e.target && e.target.id === "caExtraText") CA.extraText = e.target.value;
+  }
+  function caCommit() {
+    if (!CA.it) return;
+    const plan = caCurrentPlan();
+    const changed = !!(plan.stats.removeCount || plan.stats.addCount);
+    if (!changed && CA.extraMode === "keep") { toast("沒有可套用的變更", "warn"); return; }
+    // 只有標籤真的變動時才提交，避免只改補充描述時連排序模式也被改掉。
+    if (changed) window.Tags.restore(plan.nextSel);   // 單次提交
+    if (CA.extraMode !== "keep") {
+      $("pos").value = CA.extraText;
+      try { localStorage.setItem("ui.extra", CA.extraText); } catch (e) { /* 無痕模式 */ }
+      updateWarn();
+    }
+    closeModal();
+    closeLightbox();
+    const note = CA.extraMode === "keep" ? "" :
+      "，補充描述已" + (CA.extraMode === "replace" ? "取代" : "合併");
+    toast("已套用分類（移除 " + plan.stats.removeCount + "、加入 " + plan.stats.addCount + "）" + note, "ok");
+  }
+
   /* ── 刪圖 ─────────────────────────────────────────────── */
   function confirmDelete(it) {
     if (!it) return;
@@ -1738,12 +2132,17 @@
     $("lbDel").onclick = () => confirmDelete(S.lbList[S.lbIndex]);
     $("lbSeed").onclick = () => { reuseSeed(S.lbList[S.lbIndex]); closeLightbox(); };
     $("lbPrompt").onclick = () => { reusePrompt(S.lbList[S.lbIndex]); closeLightbox(); };
+    $("lbApply").onclick = () => caOpen(S.lbList[S.lbIndex]);
 
     // 視窗
     $("modalClose").onclick = closeModal;
     $("modal").onclick = e => {
       if (e.target.id === "modal" || e.target.closest("[data-close]")) closeModal();
     };
+    // 分類套用：事件委派，重繪預覽後不需要重新綁定。
+    $("modalBody").addEventListener("click", caOnClick);
+    $("modalBody").addEventListener("change", caOnChange);
+    $("modalBody").addEventListener("input", caOnInput);
 
     // 進階設定：行內收合，記住展開狀態
     const advBox = $("advBox");
