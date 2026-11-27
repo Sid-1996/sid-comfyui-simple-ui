@@ -119,30 +119,30 @@ function Invoke-Action($action) {
         [System.Windows.Forms.Application]::DoEvents()
     }.GetNewClosure()
 
+    function Set-ActionMessage {
+        param([bool]$Ok, [string]$Text)
+        $color = [System.Drawing.Color]::FromArgb(170, 230, 170)
+        if (-not $Ok) { $color = $red; $Text = "操作失敗：$Text" }
+        $msg.ForeColor = $color
+        $msg.Text = $Text
+    }
+
     try {
         switch ($action) {
-            'start' {
-                $r = Start-Ui -OnTick $onTick
-                $msg.Text = $r.Message
-            }
-            'stop' {
-                $r = Stop-Ui -OnTick $onTick
-                $msg.Text = $r.Message
-            }
-            'restart' {
-                $r = Restart-Ui -OnTick $onTick
-                $msg.Text = $r.Message
-            }
+            'start'   { $r = Start-Ui   -OnTick $onTick; Set-ActionMessage $r.Ok $r.Message }
+            'stop'    { $r = Stop-Ui    -OnTick $onTick; Set-ActionMessage $r.Ok $r.Message }
+            'restart' { $r = Restart-Ui -OnTick $onTick; Set-ActionMessage $r.Ok $r.Message }
             'open' {
                 Start-Process 'http://127.0.0.1:7860'
-                $msg.Text = '已開啟生圖介面（請到瀏覽器操作）。'
+                Set-ActionMessage $true '已開啟生圖介面（請到瀏覽器操作）。'
             }
             'refresh' {
-                $msg.Text = '狀態已更新。'
+                Refresh-Status
+                Set-ActionMessage $true '狀態已更新。'
             }
         }
     } catch {
-        $msg.Text = "操作失敗：$($_.Exception.Message)"
+        Set-ActionMessage $false $_.Exception.Message
     } finally {
         Refresh-Status
         foreach ($b in $allButtons) { $b.Enabled = $true }

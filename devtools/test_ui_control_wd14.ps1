@@ -96,7 +96,9 @@ with open(r'$dump1', 'w', encoding='utf-8') as f:
     Set-ParentWd14
     $script:EnvDumpFile = $dump1
     . $copy1
-    # dot-source 會定義正式 Test-PortUp，必須在之後覆寫，避免碰到正式 port
+    # dot-source 會定義正式 Test-PortUp / 程序查詢，必須在之後覆寫，避免碰到正式 port 與程序
+    function Get-PortOwnerPid { param([int]$Port) return 0 }
+    function Get-AllPythonProcesses { return @() }
     function Test-PortUp {
         param([int]$Port)
         if ($Port -eq 8188) { return $true }
@@ -136,6 +138,8 @@ with open(r'$dump2', 'w', encoding='utf-8') as f:
     Set-ParentWd14
     $script:EnvDumpFile = $dump2
     . $copy2
+    function Get-PortOwnerPid { param([int]$Port) return 0 }
+    function Get-AllPythonProcesses { return @() }
     function Test-PortUp {
         param([int]$Port)
         if ($Port -eq 8188) { return $true }
@@ -171,6 +175,8 @@ with open(r'$dump3', 'w', encoding='utf-8') as f:
     $script:stopCalls = 0
     . $copy3
     # dot-source 後再覆寫，模擬「7860 已經在運行」並攔截注入／終止行為
+    function Get-PortOwnerPid { param([int]$Port) return 0 }
+    function Get-AllPythonProcesses { return @() }
     function Test-PortUp { param([int]$Port) return $true }
     function Set-LocalWd14Env { $script:injectCalls++; return @() }
     function Stop-Process {

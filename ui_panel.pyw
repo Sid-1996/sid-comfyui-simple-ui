@@ -182,9 +182,15 @@ class Console:
         self._busy = False
         for b in self._action_buttons:
             b.config(state="normal")
-        self._write("啟動程序中，正在自動等待生圖介面準備完成…")
-        if self._auto_open_pending:
+        if action == "start":
+            self.msg.config(fg=DIM)
+            self._write("啟動程序中，正在自動等待生圖介面準備完成…")
             self._wait_and_open(0)
+        else:
+            self._auto_open_pending = False
+            self.msg.config(fg=RED)
+            self._write("操作逾時：沒有收到控制台回應，請按「重新整理狀態」確認目前服務狀態。")
+            self.refresh_status()
 
     def _wait_and_open(self, tries):
         """背景卡住時的後備：輪詢 7860，起來就自動開瀏覽器（最多 60 秒）。"""
@@ -212,19 +218,23 @@ class Console:
         self._busy = False
         for b in self._action_buttons:
             b.config(state="normal")
-        self._write(msg)
+        shown = msg if ok else f"操作失敗：{msg}"
+        self.msg.config(fg=("#aae6aa" if ok else RED))
+        self._write(shown)
         self.refresh_status()
 
-        # start 成功 → 自動開瀏覽器；背景卡住沒回報 → 交給 _wait_and_open 輪詢
+        # start 成功 → 自動開瀏覽器；失敗時不自動開，也不誤顯示成功
         if action == "start":
             if ok and port_up(7860):
                 self._auto_open_pending = False
                 import webbrowser
                 webbrowser.open("http://127.0.0.1:7860")
-                self._write(msg + "\n（已自動開啟生圖介面）")
+                self._write(shown + "\n（已自動開啟生圖介面）")
+            elif not ok:
+                self._auto_open_pending = False
             elif not port_up(7860):
                 self._auto_open_pending = True
-                self._write(msg + "\n（仍在等待生圖介面，準備好會自動開啟）")
+                self._write(shown + "\n（仍在等待生圖介面，準備好會自動開啟）")
                 self._wait_and_open(0)
 
     def open_ui(self):
