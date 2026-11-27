@@ -65,7 +65,10 @@ Commit：`ac93a715cc10b0bc81f572131439376b9fec45e6`
 
 ### 3.4 文件與歷史報告
 
-預計以獨立文件 Commit 收納：
+文件 Commit：`aa1ccc8d1ea173a18ce0a9e7cb90f9c4566b5310`
+訊息：`docs: index project development reports`
+
+共 65 個檔案，新增 21,921 行，收納：
 - `AGENTS.md` 的瀏覽器工具路由及驗收注意事項。
 - `devtools/reports/README.md` 報告索引。
 - 本次整理前累積的 63 份 Markdown 報告。
@@ -125,4 +128,8 @@ LoRA UI E2E 使用隔離 Simple UI（7861）、Mock ComfyUI（18188）、Mock Ci
 
 ## 7. 最終結果
 
-本報告建立時，前三組功能 Commit 已完成，`origin/main` 已 Fetch 確認沒有落後；文件報告組與最後 Push 依本次結案流程完成。最終 Branch、HEAD、遠端同步狀態及剩餘本機 A/B 原始資料，以本次對話最後一次直接讀取的 Git 狀態為準。
+- 文件報告 Commit：`aa1ccc8d1ea173a18ce0a9e7cb90f9c4566b5310`。
+- 一般 `git push origin main` 已成功，遠端回報 `da2112b..aa1ccc8 main -> main`。
+- Push 後再次 Fetch，`HEAD` 與 `origin/main` 均為 `aa1ccc8d1ea173a18ce0a9e7cb90f9c4566b5310`，Ahead / Behind 為 `0 / 0`。
+- 追蹤檔案無修改、無 staged 內容；唯一未追蹤項目是兩個 A/B 原始資料目錄，合計 25 個 JSON 與 9 張 PNG，均完整保留。
+- 本報告在首次 Push 後補記實際 Commit／同步結果；本次報告修訂會再以獨立文件 Commit 提交並同步，避免報告停留在預計狀態。
