@@ -13,6 +13,9 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const args = {};
 for (let i = 2; i < process.argv.length; i += 2) args[process.argv[i].replace(/^--/, "")] = process.argv[i + 1];
@@ -147,10 +150,21 @@ try {
   // 只影響這個隔離分頁的請求，不改后端的任何回應格式。
   let loraApiOverride = null;
   let cvStatusOverride = null;
+  let loraMetaOverride = null;   // 最後一項 E2E：注入兩組本機建議
+  let appJsOverride = null;      // 最後一項 E2E：只對瀏覽器提供的測試版 app.js
+  let cvVersionOverride = null;  // 模擬同版本更新失敗（避開後端 300 秒快取）
   let apiStatusTestsDone = false;
+  let cvVersion404TestsDone = false;   // 故意觸發 404 時，瀏覽器會記錄資源錯誤
+  let cvVersionStaleTestsDone = false; // 故意讓舊版本延遲失敗（500）時，瀏覽器會記錄資源錯誤
+  let cvVersionReqCount = 0;           // 計數：實際送出的 /api/civitai/version 請求數
   cdp.on("Fetch.requestPaused", async p => {
     try {
-      const spec = /\/api\/civitai\/status(?:\?|$)/.test(p.request.url) ? cvStatusOverride
+      // 計數：每個真正送出的 /api/civitai/version 請求（不論是否攔截回應）
+      if (/\/api\/civitai\/version(?:\?|$)/.test(p.request.url)) cvVersionReqCount++;
+      const spec = /\/app\.js(?:\?|$)/.test(p.request.url) ? appJsOverride
+        : /\/api\/civitai\/version(?:\?|$)/.test(p.request.url) ? cvVersionOverride
+        : /\/api\/lora-meta(?:\?|$)/.test(p.request.url) ? loraMetaOverride
+        : /\/api\/civitai\/status(?:\?|$)/.test(p.request.url) ? cvStatusOverride
         : /\/api\/loras(?:\?|$)/.test(p.request.url) ? loraApiOverride : null;
       if (spec) {
         await cdp.send("Fetch.fulfillRequest", {
@@ -169,13 +183,35 @@ try {
   });
   await cdp.send("Fetch.enable", { patterns: [
     { urlPattern: "*/api/loras*", requestStage: "Request" },
-    { urlPattern: "*/api/civitai/status*", requestStage: "Request" }
+    { urlPattern: "*/api/civitai/status*", requestStage: "Request" },
+    { urlPattern: "*/api/civitai/version*", requestStage: "Request" }
   ] });
 
   // 2) 開頁並等 app 就緒
   await cdp.send("Page.navigate", { url: UI + "/?v=lora-e2e" });
   await waitFor(() => cdp.eval("document.readyState === 'complete' && document.querySelectorAll('#ckpt option').length > 0"), "app 載入");
   await waitFor(() => cdp.eval("document.querySelector('#statusText').textContent.includes('已連線')"), "ComfyUI 狀態列");
+
+  const qualityCounts = await cdp.eval(`(() => {
+    const q = document.querySelector('#search');
+    q.value = 'masterpiece'; q.dispatchEvent(new Event('input', { bubbles: true }));
+    const general = document.querySelectorAll('#tags .tag[data-e="masterpiece"]').length;
+    const catsGeneral = document.querySelector('#cats').textContent;
+    const adv = document.querySelector('#advBox'); adv.open = true;
+    window.Tags.refresh();
+    const advanced = document.querySelectorAll('#tags .tag[data-e="masterpiece"]').length;
+    const catsAdvanced = document.querySelector('#cats').textContent;
+    document.querySelector('#tags .tag[data-e="masterpiece"]')?.click();
+    const selected = document.querySelector('#tags .tag[data-e="masterpiece"]')?.getAttribute('aria-pressed') === 'true';
+    adv.open = false; window.Tags.refresh();
+    q.value = ''; q.dispatchEvent(new Event('input', { bubbles: true }));
+    return { general, advanced, selected, catsGeneral, catsAdvanced };
+  })()`);
+  check(qualityCounts.general === 0 && qualityCounts.advanced === 1 && qualityCounts.selected,
+    "品質詞一般模式隱藏、進階模式可選且能保留選取");
+  check(qualityCounts.catsGeneral.includes("可選 ") && qualityCounts.catsAdvanced.includes("全部 "),
+    "分類數量文案隨一般／進階模式切換");
+  ok("品質詞篩選、分類數量與選取狀態");
   ok("頁面載入、ComfyUI 狀態列顯示已連線");
 
   const consoleErrors = () => cdp.events
@@ -184,7 +220,9 @@ try {
     .map(e => e.method === "Log.entryAdded" ? e.params.entry.text
       : e.params.args.map(a => a.value || a.description || "").join(" "))
     .filter(t => !/websocket|\/ws|favicon/i.test(t))
-    .filter(t => !(apiStatusTestsDone && /Failed to load resource: the server responded with a status of (503|502)/.test(t)));
+    .filter(t => !(apiStatusTestsDone && /Failed to load resource: the server responded with a status of (503|502)/.test(t)))
+    .filter(t => !(cvVersion404TestsDone && /Failed to load resource: the server responded with a status of 404/.test(t)))
+    .filter(t => !(cvVersionStaleTestsDone && /Failed to load resource: the server responded with a status of 500/.test(t)));
 
   // 3) 初始狀態
   const initState = await cdp.eval(`(() => ({
@@ -229,15 +267,54 @@ try {
   ok("搜尋框可過濾並清除");
 
   // 6) 加入第一個 LoRA
+  const backupIdForUi = "00112233-4455-4677-8899-aabbccddeeff";
+  const backupIdRestore = "10112233-4455-4677-8899-aabbccddeeff";
+  await cdp.eval(`(() => {
+    const base = { createdAt: 1735296000000, sourceKey: 'ui.loras', itemName: ${js(MIKU)}, targetVersion: 2,
+      expectedItemCount: 0, status: 'pending', confirmedAt: null, note: 'isolated UI fixture' };
+    localStorage.setItem('ui.loras.migrationBackup', JSON.stringify({ v: 1, backups: [
+      { ...base, backupId: ${js(backupIdForUi)}, reason: 'dual-conflict', payload: { kind: 'item', value: { triggers: ['old'], personalTriggers: ['new'] } } },
+      { ...base, backupId: ${js(backupIdRestore)}, reason: 'v1-data-v2-empty', payload: { kind: 'item', value: { triggers: ['old-restored'], personalTriggers: [] } } }
+    ] }));
+    window.__backupConfirmCalls = [];
+    const original = window.LoraMigration.confirmBackup;
+    window.LoraMigration.confirmBackup = function(store, id) { window.__backupConfirmCalls.push(id); return original(store, id); };
+  })()`);
   await cdp.eval(pickRow(MIKU) + '.querySelector(".lora-pick-main").click()');
   await waitFor(() => cdp.eval("document.querySelector('#loraCount').textContent.trim() === '1'"), "加入 LoRA");
+  await waitFor(() => cdp.eval("!!document.querySelector('#loraBackupNotice [data-backup-confirm]')"), "備份確認入口");
+  const backupUi = await cdp.eval(`(() => ({
+    count: document.querySelector('#loraBackupNotice .lora-backup-head').textContent,
+    id: document.querySelector('#loraBackupNotice [data-backup-confirm]').dataset.backupConfirm
+  }))()`);
+  check(backupUi.id === backupIdForUi && backupUi.count.includes("2 筆待確認"), JSON.stringify(backupUi));
+  await cdp.eval(`document.querySelector('#loraBackupNotice [data-backup-confirm="${backupIdForUi}"]').click()`);
+  await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras.migrationBackup')).backups[0].status === 'confirmed'"), "備份確認讀回");
+  const backupConfirm = await cdp.eval(`({ calls: window.__backupConfirmCalls, record: JSON.parse(localStorage.getItem('ui.loras.migrationBackup')).backups[0] })`);
+  check(JSON.stringify(backupConfirm.calls) === JSON.stringify([backupIdForUi]), "確認必須呼叫正確 backupId：" + JSON.stringify(backupConfirm.calls));
+  check(backupConfirm.record.backupId === backupIdForUi && backupConfirm.record.confirmedAt > 0, JSON.stringify(backupConfirm.record));
+  check(!!await cdp.eval("localStorage.getItem('ui.loras.migrationBackup')"), "確認不可刪除備份");
+  await cdp.eval(`document.querySelector('#loraBackupNotice [data-backup-restore="${backupIdRestore}"]').click()`);
+  await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras.migrationBackup')).backups[1].status === 'confirmed'"), "還原舊詞確認");
+  const restoreUi = await cdp.eval(`({ calls: window.__backupConfirmCalls, triggers: JSON.parse(localStorage.getItem('ui.loras')).items[0].personalTriggers,
+    record: JSON.parse(localStorage.getItem('ui.loras.migrationBackup')).backups[1] })`);
+  check(JSON.stringify(restoreUi.calls) === JSON.stringify([backupIdForUi, backupIdRestore]), "確認與還原必須以正確 backupId 呼叫 confirmBackup：" + JSON.stringify(restoreUi.calls));
+  check(restoreUi.triggers.includes("old-restored") && restoreUi.record.confirmedAt > 0, JSON.stringify(restoreUi));
+  check(await cdp.eval("JSON.parse(localStorage.getItem('ui.loras.migrationBackup')).backups.length === 2"), "確認流程不可刪除備份");
+  // 清掉 UI fixture 還原的舊詞，確保後續 LoRA 觸發詞回歸從乾淨狀態開始。
+  await cdp.eval(`(() => { const d = JSON.parse(localStorage.getItem('ui.loras')); d.items[0].personalTriggers = []; localStorage.setItem('ui.loras', JSON.stringify(d)); })()`);
+  await cdp.send("Page.reload", { ignoreCache: true });
+  await waitFor(() => cdp.eval("document.readyState === 'complete' && document.querySelectorAll('#loraList .lora-row').length === 1"), "確認測試資料重載");
+  ok("使用者確認保留結果／還原舊詞皆呼叫正確 backupId，讀回 verified 且備份保留");
   const stored = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras'))");
-  check(stored.v === 1 && stored.items.length === 1, JSON.stringify(stored));
+  check(stored.v === 2 && stored.items.length === 1, JSON.stringify(stored));
   check(stored.items[0].name === MIKU && stored.items[0].enabled === true, JSON.stringify(stored.items[0]));
   check(stored.items[0].strength === 0.8, "預設權重應為 0.8：" + stored.items[0].strength);
   ok("加入 LoRA：主畫面計數、ui.loras 預設值（0.8）正確");
 
   // 7) 觸發詞：metadata、去重、編輯
+  await cdp.eval("document.querySelector('#btnLoraPick').click()");
+  await waitFor(() => cdp.eval("!!document.querySelector('#loraPickList .lora-pick')"), "重新開啟 LoRA 選擇視窗");
   await cdp.eval(pickRow(MIKU) + '.querySelector("[data-lora-act=\\"triggers\\"]").click()');
   await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('sdxl_base_v1-0/lora')"), "metadata 載入", 8000);
   await cdp.eval(`(() => {
@@ -288,7 +365,7 @@ try {
   await cdp.eval(`(() => { const c = document.querySelector('#loraAuto'); c.checked = true; c.dispatchEvent(new Event('change', {bubbles:true})); })()`);
   await cdp.eval(pickRow(LINEART) + '.querySelector(".lora-pick-main").click()');
   await waitFor(() => cdp.eval("document.querySelector('#loraCount').textContent.trim() === '2'"), "加入第二個 LoRA");
-  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('沒有可讀取的 metadata')"), "沒有 metadata 的提示", 8000);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('沒有可讀取的資料')"), "沒有建議詞的提示", 8000);
   ok("沒有 metadata 的 LoRA：仍可選取，面板明確提示可手動新增");
   await cdp.eval(`(() => {
     const set = ${selRow(MIKU)}; const v = 0.9;
@@ -307,7 +384,7 @@ try {
   await cdp.eval(`(() => { const p = document.querySelector('#pos'); p.value = 'test extra mock miku'; p.dispatchEvent(new Event('input', {bubbles:true})); })()`);
   await cdp.eval("document.querySelector('#btnPreview').click()");
   const promptWithLora = await cdp.eval("document.querySelector('#modalBody .prompt-box').textContent");
-  check(promptWithLora.includes("mock_miku") && promptWithLora.includes("test extra mock miku"), promptWithLora);
+  check(promptWithLora.includes("mock miku") && promptWithLora.includes("test extra mock miku"), promptWithLora);
   await cdp.eval("document.querySelector('#modal [data-close]').click()");
   ok("提示詞預覽同時包含 LoRA 觸發詞與使用者描述");
 
@@ -332,7 +409,7 @@ try {
   check(JSON.stringify(n8.inputs.model) === '["1",0]' && JSON.stringify(n9.inputs.model) === '["' + id8 + '",0]', JSON.stringify([n8.inputs.model, n9.inputs.model]));
   check(JSON.stringify(nodes["2"].inputs.clip) === '["' + id9 + '",1]' && JSON.stringify(nodes["3"].inputs.clip) === '["' + id9 + '",1]', "CLIP 鏈接錯");
   check(JSON.stringify(nodes["5"].inputs.model) === '["' + id9 + '",0]', "KSampler MODEL 接錯");
-  check(nodes["2"].inputs.text.includes("mock_miku") && nodes["2"].inputs.text.includes("test extra mock miku"), nodes["2"].inputs.text);
+  check(nodes["2"].inputs.text.includes("mock miku") && nodes["2"].inputs.text.includes("test extra mock miku"), nodes["2"].inputs.text);
   check(!nodes["3"].inputs.text.includes("mock_miku"), "觸發詞不該進負面提示詞：" + nodes["3"].inputs.text);
   ok("2 個 LoRA 串接：MODEL／CLIP 鏈、各自權重、觸發詞都正確送出");
 
@@ -501,7 +578,7 @@ try {
   await waitFor(() => cdp.eval("document.querySelectorAll('#stageResults .shot').length > 0 && !document.querySelector('#goText').textContent.includes('生成中')"), "關閉自動加入生成完成", 20000);
   const offSaved = (await cdp.eval("JSON.parse(localStorage.getItem('ui.gallery'))"))[0].loras.find(l => l.name === MIKU);
   check(offSaved && offSaved.autoTrigger === false, "歷史未保存 autoTrigger=false：" + JSON.stringify(offSaved));
-  check(offSaved.triggers.length === 3 && ["mock_miku", "green eyes", "blue eyes"].every(t => offSaved.triggers.includes(t)), "歷史未保存完整觸發詞：" + JSON.stringify(offSaved));
+  check(offSaved.personalTriggers.length === 3 && ["mock_miku", "green eyes", "blue eyes"].every(t => offSaved.personalTriggers.includes(t)), "歷史未保存完整觸發詞：" + JSON.stringify(offSaved));
   check(offSaved.strength === 0.8 && offSaved.display === "MockMiku", "歷史未保存名稱／權重：" + JSON.stringify(offSaved));
   ok("關閉自動加入：Prompt 不含觸發詞，歷史仍完整保存 triggers / autoTrigger / 名稱 / 權重");
 
@@ -520,15 +597,16 @@ try {
     i.value = '0.4'; i.dispatchEvent(new Event('input', {bubbles:true})); i.dispatchEvent(new Event('change', {bubbles:true}));
   })()`);
   const changed = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === 'chars\\\\MockMiku.safetensors')");
-  check(changed.autoTrigger === true && changed.triggers.length === 2 && changed.strength === 0.4, "前置改動失敗：" + JSON.stringify(changed));
+  check(changed.autoTrigger === true && changed.personalTriggers.length === 2 && changed.strength === 0.4, "前置改動失敗：" + JSON.stringify(changed));
 
-  await cdp.eval("document.querySelector('#stageResults .shot [data-act=\"prompt\"]').click()");
+  await cdp.eval("document.querySelector('#stageResults .shot [data-act=\"restore\"]').click()");
+  await cdp.eval("document.querySelector('#modalBody [data-reuse=\"confirm\"]').click()");
   await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === 'chars\\\\MockMiku.safetensors').autoTrigger === false"), "歷史還原 autoTrigger");
   const restored = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === 'chars\\\\MockMiku.safetensors')");
   check(restored.autoTrigger === false, "歷史還原未恢復 autoTrigger=false：" + JSON.stringify(restored));
-  check(restored.triggers.length === 3 && ["mock_miku", "green eyes", "blue eyes"].every(t => restored.triggers.includes(t)), "歷史還原未恢復完整觸發詞：" + JSON.stringify(restored));
+  check(restored.personalTriggers.length === 3 && ["mock_miku", "green eyes", "blue eyes"].every(t => restored.personalTriggers.includes(t)), "歷史還原未恢復完整觸發詞：" + JSON.stringify(restored));
   check(restored.strength === 0.8 && restored.name === MIKU, "歷史還原未恢復名稱／權重：" + JSON.stringify(restored));
-  ok("歷史「同提示詞」還原：完整觸發詞、autoTrigger=false、名稱與權重都恢復");
+  ok("歷史完整還原確認：觸發詞、autoTrigger=false、名稱與權重都恢復");
 
   // 18) 第二輪審查回歸：loras: [] 要清空；沒有 loras 欄位不可清空
   const synthetic = [
@@ -546,7 +624,8 @@ try {
 
   await cdp.eval("document.querySelector('#histBar .thumb[data-i=\"0\"]').click()");
   await waitFor(() => cdp.eval("document.querySelector('#lightbox').hidden === false"), "空 LoRA 歷史的燈箱");
-  await cdp.eval("document.querySelector('#lbPrompt').click()");
+  await cdp.eval("document.querySelector('#lbRestore').click()");
+  await cdp.eval("document.querySelector('#modalBody [data-reuse=\"confirm\"]').click()");
   await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.length === 0"), "空 LoRA 清空");
   const cleared = await cdp.eval(`(() => ({
     stored: JSON.parse(localStorage.getItem('ui.loras')).items.length,
@@ -567,6 +646,7 @@ try {
   await cdp.eval("document.querySelector('#histBar .thumb[data-i=\"1\"]').click()");
   await waitFor(() => cdp.eval("document.querySelector('#lightbox').hidden === false"), "舊歷史的燈箱");
   await cdp.eval("document.querySelector('#lbPrompt').click()");
+  await cdp.eval("document.querySelector('#modalBody [data-positive-reuse=\"confirm\"]').click()");
   await waitFor(() => cdp.eval("localStorage.getItem('ui.extra') === 'from old record'"), "舊歷史還原");
   const kept = await cdp.eval(`(() => ({
     items: JSON.parse(localStorage.getItem('ui.loras')).items.map(x => [x.name, x.enabled]),
@@ -720,6 +800,115 @@ try {
         "成熟內容開關未讓後端帶 nsfw=true：" + JSON.stringify(allQ2));
   ok("探索中心：成熟內容開關只影響 Civitai 搜尋（後端轉為 nsfw=true）");
 
+  // 20.5) 圖片預覽：卡片縮圖、版本隔離、詳細 Modal、切圖、NSFW、失敗降級
+  await cdp.eval(`(() => {
+    const c = document.querySelector('#cvNsfw'); c.checked = false; c.dispatchEvent(new Event('change', {bubbles:true}));
+    const i = document.querySelector('#cvSearch'); i.value = 'images'; i.dispatchEvent(new Event('input', {bubbles:true}));
+    document.querySelector('#cvGo').click();
+  })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#cvResults').textContent.includes('Image Good') && document.querySelector('#cvResults').textContent.includes('Image None')"), "圖片搜尋結果");
+  const pvCard = await cdp.eval(`(() => {
+    const cards = [...document.querySelectorAll('#cvResults .cv-card')];
+    const good = cards.find(c => c.textContent.includes('Image Good'));
+    const none = cards.find(c => c.textContent.includes('Image None'));
+    const adult = cards.find(c => c.textContent.includes('Image NSFW Model'));
+    const img = good && good.querySelector('.cv-thumb img');
+    const box = good && good.querySelector('.cv-thumb');
+    const r = box && box.getBoundingClientRect();
+    return {
+      good: !!good, none: !!none,
+      src: img ? img.src : '',
+      w: r ? Math.round(r.width) : 0, h: r ? Math.round(r.height) : 0,
+      noneThumb: !!(none && none.querySelector('.cv-thumb-none')),
+      noneImg: !!(none && none.querySelector('.cv-thumb img')),
+      adultPlaceholder: !!(adult && adult.querySelector('.cv-thumb-none')),
+      adultImg: !!(adult && adult.querySelector('.cv-thumb img'))
+    };
+  })()`);
+  check(pvCard.good && pvCard.none, "圖片搜尋應有兩張卡：" + JSON.stringify(pvCard));
+  check(pvCard.w === 64 && pvCard.h === 80, "卡片縮圖應為 64×80：" + JSON.stringify(pvCard));
+  check(pvCard.src.includes('image.civitai.com') && pvCard.src.includes('width=300'), "縮圖應走 CDN width=300：" + pvCard.src);
+  check(pvCard.src.includes('/1.jpeg') && !pvCard.src.includes('/99.jpeg'), "縮圖應來自最佳適配版本：" + pvCard.src);
+  check(pvCard.noneThumb && !pvCard.noneImg, "無圖片應顯示一致佔位：" + JSON.stringify(pvCard));
+  check(pvCard.adultPlaceholder && !pvCard.adultImg, "模型層級 nsfw 在成熟內容關閉時應受保護：" + JSON.stringify(pvCard));
+  ok("卡片圖片：64×80 固定縮圖、真實 API 形狀安全圖可見、無圖佔位、模型層級 NSFW 保護、只取最佳適配版本");
+
+  await cdp.eval("document.querySelector('#cvResults .cv-thumb[data-cv-preview]').click()");
+  await waitFor(() => cdp.eval("document.querySelector('#modal').hidden === false && !!document.querySelector('#pvMain')"), "詳細預覽開啟");
+  const pvOpen = await cdp.eval(`(() => ({
+    src: document.querySelector('#pvMain').src,
+    strip: document.querySelectorAll('#pvStrip .cv-pv-thumb').length,
+    name: document.querySelector('#pvName').textContent,
+    base: document.querySelector('#pvBase').textContent,
+    badge: document.querySelector('#pvBadge').textContent,
+    count: document.querySelector('#pvCount').textContent,
+    link: document.querySelector('#pvLink').href,
+    main: (() => { const r = document.querySelector('.cv-pv-stage').getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })(),
+    thumb: (() => { const r = document.querySelector('#pvStrip .cv-pv-thumb').getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })()
+  }))()`);
+  check(pvOpen.strip === 2, "成熟圖片應被隱藏，縮圖只能有 2 張：" + pvOpen.strip);
+  check(pvOpen.src.includes('/1.jpeg') && pvOpen.src.includes('width=300'), "主圖應是最佳版本的縮圖：" + pvOpen.src);
+  check(pvOpen.name.includes('Image Good') && pvOpen.base.includes('Illustrious') && pvOpen.badge.includes('完全適配'), JSON.stringify(pvOpen));
+  check(pvOpen.count === '圖片 1 / 2', pvOpen.count);
+  check(pvOpen.link.includes('/models/700001') && pvOpen.link.includes('modelVersionId='), pvOpen.link);
+  check(pvOpen.main[0] === 180 && pvOpen.main[1] === 225, "主圖尺寸：" + JSON.stringify(pvOpen.main));
+  check(pvOpen.thumb[0] === 48 && pvOpen.thumb[1] === 60, "縮圖尺寸：" + JSON.stringify(pvOpen.thumb));
+  ok("詳細預覽：180×225 主圖、48×60 縮圖、版本／適配資訊、成熟圖片隱藏");
+
+  await cdp.eval("document.querySelectorAll('#pvStrip .cv-pv-thumb')[1].click()");
+  check((await cdp.eval("document.querySelector('#pvMain').src")).includes('/2.jpeg'), "點擊縮圖未切換主圖");
+  ok("詳細預覽：點擊縮圖切換主圖");
+
+  await cdp.eval(`(() => {
+    const im = document.querySelector('#pvMain');
+    im.src = 'https://image.civitai.com/broken/1.jpeg';
+    im.dispatchEvent(new Event('error'));
+  })()`);
+  const pvFb1 = await cdp.eval(`(() => { const im = document.querySelector('#pvMain'); return [im.dataset.fallbackDone, im.src]; })()`);
+  check(pvFb1[0] === '1' && pvFb1[1].includes('/2.jpeg') && !pvFb1[1].includes('width=300'), "縮圖失敗應退回原圖：" + JSON.stringify(pvFb1));
+  await cdp.eval("document.querySelector('#pvMain').dispatchEvent(new Event('error'))");
+  const pvFb2 = await cdp.eval(`(() => [document.querySelector('#pvMain').src, document.querySelector('.cv-pv-stage').classList.contains('failed')])()`);
+  check(pvFb2[0] === '' && pvFb2[1] === true, "原圖也失敗應顯示降級：" + JSON.stringify(pvFb2));
+  ok("詳細預覽：縮圖失敗退回原圖、原圖失敗顯示降級訊息");
+
+  await cdp.eval(`(() => {
+    const im = document.querySelector('#cvResults .cv-thumb img');
+    im.src = 'https://image.civitai.com/broken/2.jpeg';
+    im.dispatchEvent(new Event('error'));
+  })()`);
+  const cardFb1 = await cdp.eval(`(() => { const im = document.querySelector('#cvResults .cv-thumb img'); return [im.dataset.fallbackDone, im.src]; })()`);
+  check(cardFb1[0] === '1' && cardFb1[1].includes('original=true'), "卡片縮圖失敗應退回原圖：" + JSON.stringify(cardFb1));
+  await cdp.eval("document.querySelector('#cvResults .cv-thumb img').dispatchEvent(new Event('error'))");
+  check(await cdp.eval("document.querySelector('#cvResults .cv-thumb img').hidden === true"), "卡片圖片雙失敗應隱藏，由佔位接管");
+  ok("卡片縮圖：兩段式失敗降級，不破圖、不撐版面");
+
+  await cdp.eval("[...document.querySelectorAll('#modal [data-close]')].find(b => b.textContent.includes('關閉')).click()");
+  check(await cdp.eval("document.querySelector('#modal').hidden === true"), "詳細預覽無法關閉");
+  check(await cdp.eval("document.querySelector('#pvMain').src === ''"), "關閉後應清空主圖 src");
+  ok("詳細預覽：關閉後清空圖片資源與事件");
+
+  // 20.6) 成熟內容開啟：明確成熟與未知標記圖片都應依設定顯示
+  await cdp.eval(`(() => {
+    const c = document.querySelector('#cvNsfw'); c.checked = true; c.dispatchEvent(new Event('change', {bubbles:true}));
+  })()`);
+  // mock 在 nsfw=true 時回傳獨特項目，確認新回應已套用，而不是讀到上一輪舊 DOM。
+  await waitFor(() => cdp.eval("document.querySelector('#cvResults').textContent.includes('Image Nsfw Mode')"), "成熟模式搜尋結果");
+  const allQ3 = await (await fetch(MOCKCV + "/__mock/all")).json();
+  check(allQ3.some(x => (x.query || [""])[0] === "images" && (x.nsfw || [""])[0] === "true"),
+        "成熟模式未讓後端帶 nsfw=true：" + JSON.stringify(allQ3.slice(-2)));
+  await cdp.eval("document.querySelector('#cvResults .cv-thumb[data-cv-preview]').click()");
+  await waitFor(() => cdp.eval("document.querySelector('#modal').hidden === false && document.querySelectorAll('#pvStrip .cv-pv-thumb').length === 4"), "成熟模式詳細預覽");
+  const stripOn = await cdp.eval("[...document.querySelectorAll('#pvStrip .cv-pv-thumb img')].map(i => i.src)");
+  check(stripOn.length === 4 && stripOn.some(s => s.includes('/3.jpeg')) && stripOn.some(s => s.includes('/4.jpeg')),
+        "成熟模式應顯示 4 張（含成熟與未知）：" + JSON.stringify(stripOn));
+  const adultOn = await cdp.eval(`(() => {
+    const c = [...document.querySelectorAll('#cvResults .cv-card')].find(x => x.textContent.includes('Image NSFW Model'));
+    return c ? { img: !!c.querySelector('.cv-thumb img'), ph: !!c.querySelector('.cv-thumb-none') } : null;
+  })()`);
+  check(adultOn && adultOn.img && !adultOn.ph, "成熟內容開啟時模型層級 nsfw 圖片應可見：" + JSON.stringify(adultOn));
+  ok("成熟內容開啟：明確成熟、未知標記與模型層級 NSFW 圖片皆依設定顯示");
+  await cdp.eval("[...document.querySelectorAll('#modal [data-close]')].find(b => b.textContent.includes('關閉')).click()");
+
   await cdp.eval(`(() => {
     const s = document.querySelector('#ckpt');
     const o = document.createElement('option'); o.value = 'UnknownCkpt.safetensors'; s.appendChild(o);
@@ -758,6 +947,409 @@ try {
   ok("探索中心：Checkpoint 辨識錯誤顯示實際原因，且所有分類維持保守");
   cvStatusOverride = null;
   await cdp.eval("document.querySelector('#exploreClose').click()");
+
+  // ── Phase 2：作者建議 / 個人詞分離 ─────────────────────────
+  const waitCvIdle = () => waitFor(() => cdp.eval("(() => { const b = document.querySelector('#loraTrigPanel [data-lora-act=cv-link]'); return !!b && !b.disabled; })()"), "Civitai 可再次讀取", 15000);
+  const mockVersion = async (data, code = 200, opts = {}) => {
+    const r = await fetch(MOCKCV + "/__mock/version", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ id: data.id, data, code }, opts))
+    });
+    check(r.ok, "設定 mock Civitai 版本失敗");
+  };
+  const v1 = { id: 3276795, modelId: 2898222, name: "Illustrious", baseModel: "Illustrious",
+    baseModelType: "Standard", trainedWords: ["amora,  blonde hair,, long_hair", "cleavage, black dress"] };
+  await mockVersion(v1);
+  await cdp.eval("document.querySelector('#btnLoraPick').click()");
+  await waitFor(() => cdp.eval("!!document.querySelector('#loraPickList .lora-pick')"), "重開 LoRA Modal");
+  await cdp.eval(pickRow(MIKU) + '.querySelector("[data-lora-act=\\"triggers\\"]").click()');
+  await waitFor(() => cdp.eval("!!document.querySelector('#loraCvId')"), "觸發詞面板");
+  const sections = await cdp.eval("document.querySelectorAll('#loraTrigPanel .lora-section').length");
+  check(sections === 3, "應有三個分區（個人/本機/Civitai）：" + sections);
+  ok("Phase 2：個人詞、本機建議、Civitai 建議三個分區同時存在");
+
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId');
+    i.value = 'https://civitai.com/models/2898222?modelVersionId=3276795';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelectorAll('#loraTrigPanel [data-src=civitai][data-lora-act=add-group]').length === 2"),
+    "Civitai 兩組建議載入", 15000);
+  const beforeAdd = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.length");
+  await cdp.eval(`document.querySelector('#loraTrigPanel [data-src=civitai][data-g="0"][data-lora-act=add-group]').click()`);
+  await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.length >= " + (beforeAdd + 3)), "整組加入");
+  await cdp.eval(`document.querySelector('#loraTrigPanel [data-src=civitai][data-g="1"][data-w="1"][data-lora-act=add-word]').click()`);
+  await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.includes('black dress')"), "逐詞加入");
+  const afterAdd = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ")");
+  check(afterAdd.personalTriggers.includes("amora") && afterAdd.personalTriggers.includes("long_hair"), "整組加入失敗：" + JSON.stringify(afterAdd.personalTriggers));
+  check(!afterAdd.personalTriggers.some(t => t.includes(",")), "不可把整串逗號文字當成一個詞：" + JSON.stringify(afterAdd.personalTriggers));
+  check(afterAdd.noTriggerNeeded === false, "加入個人詞後 noTriggerNeeded 應為 false");
+  check(afterAdd.authorSuggestions.local.groups.length >= 1, "本機建議不可被 Civitai 更新清掉");
+  check(afterAdd.authorSuggestions.civitai.versionId === 3276795, "版本連結未保存");
+  ok("Phase 2：整組／逐詞加入只進個人 triggers，保留順序與本機建議");
+
+  await cdp.eval("document.querySelector('#btnPreview').click()");
+  const p2 = await cdp.eval("document.querySelector('#modalBody .prompt-box').textContent");
+  check(p2.includes("amora") && p2.includes("black dress") && !p2.includes("cleavage"), "只注入個人詞：" + p2);
+  await cdp.eval("document.querySelector('#modal [data-close]').click()");
+  ok("Phase 2：只有個人 triggers 會進入 Prompt，未選的作者建議不會注入");
+
+  // noTriggerNeeded 狀態轉換
+  await cdp.eval("document.querySelector('[data-lora-act=no-trigger]').click()");
+  check(await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").noTriggerNeeded === true"), "確認不需要");
+  await cdp.eval(`(() => { const i = document.querySelector('#loraTrigInput');
+    i.value = 'extra personal'; document.querySelector('#loraTrigSave').click(); })()`);
+  check(await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").noTriggerNeeded === false"), "手動新增應取消確認");
+  await cdp.eval("document.querySelector('[data-lora-act=no-trigger]').click()");
+  await cdp.eval(`(() => { const c = document.querySelector('#loraAuto'); c.checked = false; c.dispatchEvent(new Event('change', {bubbles:true})); })()`);
+  check(await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").noTriggerNeeded === true"), "autoTrigger 不應改變確認狀態");
+  await cdp.eval(`(() => { const c = document.querySelector('#loraAuto'); c.checked = true; c.dispatchEvent(new Event('change', {bubbles:true})); })()`);
+  await cdp.eval(`(() => { for (let i = 0; i < 40; i++) {
+    const b = document.querySelector('#loraTrigPanel [data-lora-act=del-trig]');
+    if (!b) break; b.click();
+  } })()`);
+  check(await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").noTriggerNeeded === true"), "刪光個人詞不可自動改為尚未確認");
+  ok("Phase 2：noTriggerNeeded 六種狀態轉換正確");
+
+  // 作者建議更新不覆蓋個人詞；不同版本不混在一起
+  const keep = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.join('|')");
+  const v2 = { id: 3276796, modelId: 2898222, name: "v2", baseModel: "Illustrious",
+    baseModelType: "Standard", trainedWords: ["new secret", "new hair"] };
+  await mockVersion(v2);
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '3276796';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('已選版本：3276796')"), "切換版本", 15000);
+  await sleep(1500);
+  check(await cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('new secret')"),
+        "新版本建議未顯示：" + await cdp.eval("document.querySelector('#loraTrigPanel').textContent.slice(-200)"));
+  const updated = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ")");
+  check(updated.personalTriggers.join("|") === keep, "作者建議更新不可動個人詞：" + JSON.stringify(updated.personalTriggers));
+  check(!updated.authorSuggestions.civitai.groups.some(g => g.includes("amora")), "不同版本的建議不可混在一起");
+  ok("Phase 2：作者 metadata 更新只換建議，個人詞與舊版本都不回退");
+
+  // 無建議 vs API 故障
+  await mockVersion({ id: 3276801, modelId: 9, name: "empty", trainedWords: [] });
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '3276801';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('這個來源沒有提供建議詞')"), "空建議狀態", 15000);
+  ok("Phase 2：沒有 trainedWords 顯示為正常空建議，不是 API 故障");
+  await mockVersion({ id: 3276802, modelId: 9, name: "broken", trainedWords: [] }, 404);
+  cvVersion404TestsDone = true;
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '3276802';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('取得失敗')"), "Civitai 404 狀態", 15000);
+  const afterErr = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ")");
+  check(afterErr.authorSuggestions.civitai.versionId === 3276802, "取得失敗也應保留版本連結");
+  check(afterErr.personalTriggers.join("|") === keep, "API 失敗不可動個人詞");
+  ok("Phase 2：Civitai 取得失敗有獨立狀態，不破壞既有設定");
+
+  // ── Civitai 建議詞 UX：指引、保留輸入、重試、避免重複請求 ─────
+  const cvHelp = await cdp.eval("document.querySelector('#loraTrigPanel').textContent");
+  check(cvHelp.includes("跟你下載的檔案相同的版本") && cvHelp.includes("civitai.com/models/2898222?modelVersionId=3276795"),
+        "缺少取得網址的簡單指引與範例");
+  check(cvHelp.includes("不知道怎麼設定可以直接略過，不影響生圖"), "缺少選用功能說明");
+  check(cvHelp.includes("取消版本連結") && cvHelp.includes("不會刪除你自己的觸發詞"), "取消連結文案不清楚");
+  ok("Civitai UX：一般使用者看得懂如何取得網址、知道可略過、取消連結不刪詞");
+
+  const triggersBeforeUx = await cdp.eval("JSON.stringify(JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers)");
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = 'not-a-url';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  const badToast = await cdp.eval("[...document.querySelectorAll('#toasts .toast')].map(t => t.textContent).join(' | ')");
+  check(/請貼上模型頁面的網址/.test(badToast), "不正確網址應有清楚提示：" + badToast);
+  check((await cdp.eval("document.querySelector('#loraCvId').value")) === "not-a-url", "不正確網址也要保留輸入");
+  ok("Civitai UX：不正確網址有提示且保留輸入");
+
+  await mockVersion({ id: 3277300, modelId: 9, name: "fail first", trainedWords: [] }, 500);
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '3277300';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('取得失敗')"), "失敗狀態", 15000);
+  check((await cdp.eval("document.querySelector('#loraCvId').value")) === "3277300", "失敗後不可清空輸入");
+  await mockVersion({ id: 3277300, modelId: 9, name: "retry ok", trainedWords: ["retry ok"] });
+  await waitCvIdle();
+  await cdp.eval("document.querySelector('[data-lora-act=cv-link]').click()");
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('retry ok')"), "不重新輸入直接重試", 15000);
+  ok("Civitai UX：讀取失敗保留輸入，可直接按「重新讀取」重試");
+
+  await mockVersion({ id: 3277301, modelId: 9, name: "slow", trainedWords: ["slow ok"] }, 200, { delay_ms: 1200 });
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '3277301';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  check(await cdp.eval("document.querySelector('#loraTrigPanel [data-lora-act=cv-link]').disabled === true"), "讀取中應禁用按鈕");
+  await cdp.eval("document.querySelector('[data-lora-act=cv-link]').click()");
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('正在讀取，請稍候')"), "讀取中狀態", 15000);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('slow ok')"), "讀取完成", 15000);
+  ok("Civitai UX：讀取中有明確狀態且不能重複點擊造成干擾");
+
+  await mockVersion({ id: 3277302, modelId: 9, name: "keep", trainedWords: ["keep word"] });
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '3277302';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('keep word')"), "首次成功", 15000);
+  const beforeRefresh = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ")");
+  cvVersionStaleTestsDone = true;
+  cvVersionOverride = { status: 500, type: "application/json; charset=utf-8",
+    body: JSON.stringify({ ok: false, error: "測試更新失敗" }) };
+  await waitCvIdle();
+  await cdp.eval("document.querySelector('[data-lora-act=cv-link]').click()");
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('仍顯示先前已取得的建議')"), "更新失敗保留舊資料", 15000);
+  cvVersionOverride = null;
+  const afterRefresh = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ")");
+  check(afterRefresh.authorSuggestions.civitai.groups.some(g => g.includes("keep word")), "更新失敗不可清掉舊建議");
+  check(JSON.stringify(afterRefresh.personalTriggers) === JSON.stringify(beforeRefresh.personalTriggers), "更新失敗不可動個人觸發詞");
+  check(JSON.stringify(afterRefresh.authorSuggestions.local) === JSON.stringify(beforeRefresh.authorSuggestions.local), "更新失敗不可動本機建議");
+  ok("Civitai UX：同版本更新失敗時保留先前成功資料");
+
+  const localBeforeUnlink = await cdp.eval("JSON.stringify(JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").authorSuggestions.local)");
+  await cdp.eval("document.querySelector('[data-lora-act=cv-unlink]').click()");
+  await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").authorSuggestions.civitai.versionId === null"), "取消版本連結");
+  const afterUnlink = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ")");
+  const triggersAfterUnlink = await cdp.eval("JSON.stringify(JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers)");
+  check(triggersAfterUnlink === triggersBeforeUx, "取消連結不可刪個人觸發詞");
+  check(JSON.stringify(afterUnlink.authorSuggestions.local) === localBeforeUnlink, "取消連結不可清本機建議");
+  const unlinkToast = await cdp.eval("[...document.querySelectorAll('#toasts .toast')].map(t => t.textContent).join(' | ')");
+  check(/你自己的觸發詞都還在/.test(unlinkToast), "取消連結要有明確回饋：" + unlinkToast);
+  ok("Civitai UX：取消版本連結不刪個人詞、不清本機建議，且有明確回饋");
+
+  // ── 審查修正一：40 詞上限與 toast 數量一致 ─────────────────
+  // 面板仍開著：先清空個人詞，再多筆輸入到 39 個（不靠 reload）
+  await cdp.eval(`(() => { for (let i = 0; i < 40; i++) {
+    const b = document.querySelector('#loraTrigPanel [data-lora-act=del-trig]');
+    if (!b) break; b.click();
+  } })()`);
+  await cdp.eval(`(() => { const i = document.querySelector('#loraTrigInput');
+    i.value = Array.from({length: 39}, (_, k) => 'filled' + k).join(',');
+    document.querySelector('#loraTrigSave').click(); })()`);
+  await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.length === 39"), "填入 39 詞");
+  const copy = await cdp.eval("document.querySelector('#loraTrigPanel').textContent");
+  check(copy.includes("這是選用功能，不知道怎麼設定可以直接略過，不影響生圖"), "缺少選用功能說明");
+  check(copy.includes("我的觸發詞") && copy.includes("從模型檔案讀取的建議詞") && copy.includes("Civitai 作者提供的建議詞"), "一般使用者文案未更新");
+  ok("審查修正：Civitai 明確標示為選用功能，文案不使用內部技術名詞");
+
+  await mockVersion(v1);
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '3276795';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelectorAll('#loraTrigPanel [data-src=civitai][data-lora-act=add-group]').length === 2"), "建議群組載入", 15000);
+  await cdp.eval(`document.querySelector('#loraTrigPanel [data-src=civitai][data-g="0"][data-lora-act=add-group]').click()`);
+  await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.length === 40"), "只加入 1 個");
+  const capToast = await cdp.eval("[...document.querySelectorAll('#toasts .toast')].map(t => t.textContent).join(' | ')");
+  check(/已加入 1 個觸發詞/.test(capToast) && /還有 2 個沒加入/.test(capToast), "toast 與保存結果不一致：" + capToast);
+  await cdp.eval(`document.querySelector('#loraTrigPanel [data-src=civitai][data-g="1"][data-w="1"][data-lora-act=add-word]').click()`);
+  const fullToast = await cdp.eval("[...document.querySelectorAll('#toasts .toast')].map(t => t.textContent).join(' | ')");
+  check(/已滿/.test(fullToast), "滿額時不可顯示成功：" + fullToast);
+  check(await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.length === 40"), "滿額後不可再增加");
+  ok("審查修正：40 詞上限只加可容納的詞，toast 回報實際數量與未加入數");
+
+  // ── 審查修正三：過期請求的失敗不得覆蓋新版本 ───────────────
+  cvVersionStaleTestsDone = true;
+  await mockVersion({ id: 3277100, modelId: 9, name: "A fail", trainedWords: ["old word"] }, 500);
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '3277100';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('取得失敗')"), "舊版本失敗", 15000);
+  await mockVersion({ id: 3277101, modelId: 9, name: "B ok", trainedWords: ["fresh word"] });
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '3277101';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('已選版本：3277101') && document.querySelector('#loraTrigPanel').textContent.includes('fresh word')"), "新版本成功", 15000);
+  const staleTxt = await cdp.eval("document.querySelector('#loraTrigPanel').textContent");
+  check(!staleTxt.includes("取得失敗"), "舊版本的延遲失敗覆蓋了新版本狀態");
+  check(staleTxt.includes("fresh word"), "新版本建議消失");
+  const afterStale = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ")");
+  check(afterStale.personalTriggers.length === 40, "過期請求不可動個人觸發詞");
+  check(afterStale.authorSuggestions.local.groups.length >= 1, "過期請求不可清掉本機建議");
+  ok("審查修正：舊版本延遲失敗不污染新版本狀態，個人詞與本機建議完好");
+
+  // ── 第二輪審查：兩組合計 60 個建議詞，不能靜默遺失 20 個 ─────
+  const manyA = Array.from({ length: 30 }, (_, i) => "manyA" + i);
+  const manyB = Array.from({ length: 30 }, (_, i) => "manyB" + i);
+  await mockVersion({ id: 3277200, modelId: 9, name: "many",
+    trainedWords: [manyA.join(", "), manyB.join(", ")] });
+  await cdp.eval(`(() => { for (let i = 0; i < 40; i++) {
+    const b = document.querySelector('#loraTrigPanel [data-lora-act=del-trig]');
+    if (!b) break; b.click();
+  } })()`);
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '3277200';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelectorAll('#loraTrigPanel [data-src=civitai][data-lora-act=add-group]').length === 2"), "兩組建議載入", 15000);
+  await cdp.eval(`document.querySelector('#loraTrigPanel [data-src=civitai][data-g="0"][data-lora-act=add-group]').click()`);
+  await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.length === 30"), "第一組 30 詞");
+  await cdp.eval(`document.querySelector('#loraTrigPanel [data-src=civitai][data-g="1"][data-lora-act=add-group]').click()`);
+  await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.length === 40"), "第二組只加入 10 詞");
+  const manyToast = await cdp.eval("[...document.querySelectorAll('#toasts .toast')].map(t => t.textContent).join(' | ')");
+  check(/已加入 10 個觸發詞/.test(manyToast) && /還有 20 個沒加入/.test(manyToast), "60 詞合併的 toast 不正確：" + manyToast);
+  const savedMany = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ")");
+  check(savedMany.personalTriggers.length === 40 && savedMany.personalTriggers[0] === "manyA0" && savedMany.personalTriggers[39] === "manyB9",
+        "實際保存內容與順序不正確：" + JSON.stringify(savedMany.personalTriggers.slice(-3)));
+  ok("第二輪審查：60 個建議詞只存 40，toast 明確回報另外 20 個未加入");
+
+  // ── 第二輪審查修正（R2）：首次連結 / 重新讀取 / 讀取中 請求計數 ──
+  await waitCvIdle();
+  const cvLsMiku = () => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ")");
+  const cvPanelText = () => cdp.eval("document.querySelector('#loraTrigPanel').textContent");
+
+  // R2-C1：第一次連結尚未連結過的版本 → 讀取成功 → /api/civitai/version 只實際呼叫一次
+  await mockVersion({ id: 990101, modelId: 9, name: "count-first", trainedWords: ["count word"] });
+  const cvCountStart1 = cvVersionReqCount;
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '990101';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('count word')"), "首次讀取成功", 15000);
+  await sleep(300);
+  check(cvVersionReqCount - cvCountStart1 === 1,
+        "首次連結 /api/civitai/version 應只呼叫一次，實際 " + (cvVersionReqCount - cvCountStart1));
+  ok("R2：首次連結只發出一個 /api/civitai/version 請求");
+
+  // R2-C2：同版本手動重新讀取 → 只增加一次請求
+  await waitCvIdle();
+  const cvCountStart2 = cvVersionReqCount;
+  await cdp.eval("document.querySelector('[data-lora-act=cv-link]').click()");
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('count word')"), "重新讀取成功", 15000);
+  await sleep(300);
+  check(cvVersionReqCount - cvCountStart2 === 1,
+        "同版本手動重新讀取應只增加一次請求，實際 " + (cvVersionReqCount - cvCountStart2));
+  ok("R2：同版本重新讀取只增加一個請求");
+
+  // R2-C3：讀取中重複點擊不增加請求（按鈕禁用 + 防重複 + 序號世代）
+  await mockVersion({ id: 990102, modelId: 9, name: "slow-count", trainedWords: ["slow count"] }, 200, { delay_ms: 1500 });
+  await waitCvIdle();
+  const cvCountStart3 = cvVersionReqCount;
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '990102';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await cdp.eval(`(() => { for (let k = 0; k < 5; k++) {
+    const b = document.querySelector('[data-lora-act=cv-link]'); if (b) b.click(); } })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('slow count')"), "讀取完成", 15000);
+  await sleep(300);
+  check(cvVersionReqCount - cvCountStart3 === 1,
+        "讀取中重複點擊不得增加請求，實際 " + (cvVersionReqCount - cvCountStart3));
+  ok("R2：讀取中重複點擊不增加請求");
+
+  // ── 第二輪審查修正（R2）：真正延遲重疊競態 ───────────────
+  // R2-B1：A 延遲成功回應期間，取消版本連結並連結 B → A 的舊回應不得污染 B
+  const raceAok = { id: 990201, modelId: 9, name: "A-slow", trainedWords: ["A only"] };
+  const raceB1 = { id: 990202, modelId: 9, name: "B", trainedWords: ["B fresh"] };
+  await mockVersion(raceAok, 200, { delay_ms: 1800 });
+  await mockVersion(raceB1, 200);
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '990201';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel [data-lora-act=cv-link]').disabled === true"), "A 讀取中", 15000);
+  await cdp.eval("document.querySelector('[data-lora-act=cv-unlink]').click()");                 // 讀取中取消版本連結
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '990202';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);                         // 立即連結 B
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('B fresh')"), "B 成功", 15000);
+  await sleep(2200);                                                                             // 等 A 的延遲回應完成
+  const afterAokTxt = await cvPanelText();
+  const afterAok = await cvLsMiku();
+  check(afterAok.authorSuggestions.civitai.versionId === 990202, "A 舊回應不得覆蓋 B 版本：" + JSON.stringify(afterAok.authorSuggestions.civitai.versionId));
+  check(!afterAok.authorSuggestions.civitai.groups.some(g => g.some(w => /A only/.test(w))), "A 舊建議詞不得覆蓋 B：" + JSON.stringify(afterAok.authorSuggestions.civitai.groups));
+  check(afterAok.authorSuggestions.civitai.groups.some(g => g.includes("B fresh")), "B 建議詞必須保留：" + JSON.stringify(afterAok.authorSuggestions.civitai.groups));
+  check(afterAokTxt.includes("B fresh") && !afterAokTxt.includes("A only"), "A 舊回應不得覆蓋顯示");
+  check(afterAokTxt.includes("已選版本：990202") && !afterAokTxt.includes("取得失敗"), "A 舊回應不得覆蓋狀態");
+  check(await cdp.eval("document.querySelector('[data-lora-act=cv-link]').disabled === false"), "A 舊回應後不可卡在讀取中");
+  ok("R2：A 延遲成功 + 讀取中取消 + 連結 B，A 舊回應不污染 B 版本/建議/狀態");
+
+  // R2-B2：A 延遲失敗回應期間，取消版本連結並連結 B → A 的舊失敗不得污染 B
+  const raceAfail = { id: 990203, modelId: 9, name: "A-fail", trainedWords: ["A only"] };
+  const raceB2 = { id: 990204, modelId: 9, name: "B2", trainedWords: ["B2 fresh"] };
+  await mockVersion(raceAfail, 500, { delay_ms: 1800 });
+  await mockVersion(raceB2, 200);
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '990203';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel [data-lora-act=cv-link]').disabled === true"), "A 讀取中", 15000);
+  await cdp.eval("document.querySelector('[data-lora-act=cv-unlink]').click()");
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '990204';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('B2 fresh')"), "B 成功", 15000);
+  await sleep(2200);
+  const afterAfailTxt = await cvPanelText();
+  const afterAfail = await cvLsMiku();
+  check(afterAfail.authorSuggestions.civitai.versionId === 990204, "A 舊失敗不得覆蓋 B 版本");
+  check(afterAfail.authorSuggestions.civitai.groups.some(g => g.includes("B2 fresh")), "A 舊失敗不得清掉 B 建議");
+  check(afterAfailTxt.includes("B2 fresh") && !afterAfailTxt.includes("取得失敗"), "A 舊失敗不得覆蓋 B 狀態");
+  check(!afterAfail.authorSuggestions.civitai.groups.some(g => g.some(w => /A only/.test(w))), "A 舊建議不得混入 B");
+  ok("R2：A 延遲失敗 + 讀取中取消 + 連結 B，A 舊失敗不污染 B");
+
+  // R2-B3：取消後重新連結相同版本 → 先前延遲請求的舊回應不得污染新一次操作
+  const raceSame = { id: 990301, modelId: 9, name: "A-old", trainedWords: ["A old word"] };
+  await mockVersion(raceSame, 200, { delay_ms: 1800 });                                          // op1：延遲 + 舊資料
+  await waitCvIdle();
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '990301';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel [data-lora-act=cv-link]').disabled === true"), "op1 讀取中", 15000);
+  await cdp.eval("document.querySelector('[data-lora-act=cv-unlink]').click()");                 // 取消
+  await mockVersion({ id: 990301, modelId: 9, name: "A-new", trainedWords: ["A new word"] }, 200); // 同版本改新資料、不延遲
+  await cdp.eval(`(() => { const i = document.querySelector('#loraCvId'); i.value = '990301';
+    document.querySelector('[data-lora-act="cv-link"]').click(); })()`);                         // 重新連結相同版本
+  await waitFor(() => cdp.eval("document.querySelector('#loraTrigPanel').textContent.includes('A new word')"), "op2 成功", 15000);
+  await sleep(2200);                                                                             // 等 op1 延遲回應完成
+  const afterSameTxt = await cvPanelText();
+  const afterSame = await cvLsMiku();
+  check(afterSame.authorSuggestions.civitai.versionId === 990301, "版本應為重新連結的同一版本");
+  check(afterSame.authorSuggestions.civitai.groups.some(g => g.includes("A new word")), "op2 建議詞必須保留：" + JSON.stringify(afterSame.authorSuggestions.civitai.groups));
+  check(!afterSame.authorSuggestions.civitai.groups.some(g => g.some(w => /A old word/.test(w))), "op1 舊資料不得污染 op2：" + JSON.stringify(afterSame.authorSuggestions.civitai.groups));
+  check(afterSameTxt.includes("A new word") && !afterSameTxt.includes("A old word"), "op1 舊回應不得覆蓋顯示");
+  check(!afterSameTxt.includes("取得失敗"), "op1 舊失敗/舊回應不得覆蓋狀態");
+  check(await cdp.eval("document.querySelector('[data-lora-act=cv-link]').disabled === false"), "op1 舊回應後不可卡在讀取中");
+  ok("R2：取消後重新連結相同版本，先前延遲請求不污染新一次操作");
+
+  // ── 最後 E2E：真 DOM 點擊本機「全部加入我的觸發詞」─────────
+  // 產品檔案不改動；只對這個隔離分頁提供一份測試版 app.js，
+  // 讓 /api/lora-meta 的巢狀 triggerWords 能形成兩組本機建議。
+  const appSrc = fs.readFileSync(path.join(ROOT, "app.js"), "utf8");
+  const oldLine = "const next = loraNormGroups([Array.isArray(groups) ? groups : []]);";
+  const newLine = "const next = loraNormGroups(Array.isArray(groups) && groups.length && Array.isArray(groups[0]) ? groups : [Array.isArray(groups) ? groups : []]);";
+  check(appSrc.includes(oldLine), "找不到 loraSetLocalGroups 的測試替換點");
+  appJsOverride = { status: 200, type: "application/javascript; charset=utf-8",
+    body: appSrc.replace(oldLine, newLine) };
+  loraMetaOverride = { status: 200, type: "application/json; charset=utf-8",
+    body: JSON.stringify({ ok: true, meta: {
+      architecture: "test-local", triggerWords: [manyA, manyB]
+    }}) };
+  await cdp.send("Fetch.enable", { patterns: [
+    { urlPattern: "*/api/loras*", requestStage: "Request" },
+    { urlPattern: "*/api/civitai/status*", requestStage: "Request" },
+    { urlPattern: "*/api/lora-meta*", requestStage: "Request" },
+    { urlPattern: "*/api/civitai/version*", requestStage: "Request" },
+    { urlPattern: "*/app.js*", requestStage: "Request" }
+  ] });
+  await cdp.send("Page.reload", { ignoreCache: true });
+  await waitFor(() => cdp.eval("document.readyState === 'complete' && !!document.querySelector('#btnLoraPick')"),
+    "fixture reload", 25000);
+  await cdp.eval("document.querySelector('#btnLoraPick').click()");
+  await waitFor(() => cdp.eval("!!document.querySelector('#loraPickList .lora-pick')"), "重開 LoRA Modal");
+  await cdp.eval(pickRow(MIKU) + '.querySelector("[data-lora-act=\\"triggers\\"]").click()');
+  await waitFor(() => cdp.eval("document.querySelectorAll('#loraTrigPanel [data-src=local][data-lora-act=add-group]').length === 2"),
+    "本機建議區顯示兩組", 15000);
+  await cdp.eval(`(() => { for (let i = 0; i < 40; i++) {
+    const b = document.querySelector('#loraTrigPanel [data-lora-act=del-trig]');
+    if (!b) break; b.click();
+  } })()`);
+  check(await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.length === 0"),
+        "個人觸發詞必須先清空");
+  const otherBeforeLocalAll = await cdp.eval("JSON.stringify(JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(LINEART) + "))");
+  const posBeforeLocalAll = await cdp.eval("document.querySelector('#pos').value");
+  await cdp.eval("document.querySelector('#loraTrigPanel [data-lora-act=use-meta]').click()");
+  await waitFor(() => cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ").personalTriggers.length === 40"),
+    "全部加入本機建議", 15000);
+  const localAll = await cdp.eval("JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(MIKU) + ")");
+  const expected = manyA.concat(manyB.slice(0, 10));
+  check(JSON.stringify(localAll.personalTriggers) === JSON.stringify(expected),
+        "本機全部加入的順序/內容不正確：" + JSON.stringify(localAll.personalTriggers.slice(-3)));
+  check(localAll.noTriggerNeeded === false, "實際加入後 noTriggerNeeded 應為 false");
+  const localAllToast = await cdp.eval("[...document.querySelectorAll('#toasts .toast')].map(t => t.textContent).join(' | ')");
+  check(/已加入 40 個觸發詞/.test(localAllToast) && /還有 20 個沒加入/.test(localAllToast),
+        "本機全部加入的 toast 不正確：" + localAllToast);
+  const otherAfterLocalAll = await cdp.eval("JSON.stringify(JSON.parse(localStorage.getItem('ui.loras')).items.find(x => x.name === " + js(LINEART) + "))");
+  check(otherAfterLocalAll === otherBeforeLocalAll, "不可改變其他 LoRA 設定");
+  check((await cdp.eval("document.querySelector('#pos').value")) === posBeforeLocalAll,
+        "不可改變使用者描述");
+  ok("最後 E2E：真 DOM 點擊本機『全部加入我的觸發詞』，40 詞保存、20 詞明確回報");
+  appJsOverride = null;
+  loraMetaOverride = null;
+
+  await cdp.eval("document.querySelector('#loraClose2').click()");
 
   const errs = consoleErrors();
   check(errs.length === 0, "Console 有錯誤：" + JSON.stringify(errs));

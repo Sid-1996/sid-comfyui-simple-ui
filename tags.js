@@ -318,11 +318,15 @@
   function renderCats() {
     const counts = {};
     L.forEach(x => { counts[x.c] = (counts[x.c] || 0) + 1; });
+    const advanced = !!(document.getElementById("advBox") && document.getElementById("advBox").open);
+    const isQualityWord = window.PromptComposer.isQualityWord;
+    const availableCount = c => advanced || c === "__fav__" || c === "__top__"
+      ? (counts[c] || 0) : L.filter(x => x.c === c && !isQualityWord(x.e)).length;
     // 個人分類是 virtual：不進 CATS、不進 L，只從統計物化快照計數
     let favN = 0, usedN = 0;
     Object.keys(stats.tags).forEach(k => {
       const r = stats.tags[k];
-      if (!r || !CANON_ONLY[k]) return;
+      if (!r || !CANON_ONLY[k] || (!advanced && isQualityWord(k))) return;
       if (r.favorite) favN++;
       if (r.positiveCount + r.negativeCount > 0) usedN++;
     });
@@ -344,7 +348,7 @@
           : '');
       const initial = (virt || ICONS[c]) ? '' : `<span class="cat-initial">${esc((c === "成人向" || c.startsWith("成人·")) ? "成" : (c.startsWith("已學習·") ? "學" : c[0]))}</span>`;
       return `<button type="button" class="cat${on ? " on" : ""}" data-c="${esc(c)}" role="tab" aria-selected="${on}">
-        ${icon}${initial}<span>${esc(c === "__fav__" ? "我的收藏" : c === "__top__" ? "我的常用" : c)}</span><b>${counts[c] || 0}</b></button>`;
+        ${icon}${initial}<span>${esc(c === "__fav__" ? "我的收藏" : c === "__top__" ? "我的常用" : c)}</span><b>${advanced ? "全部 " : "可選 "}${availableCount(c)}</b></button>`;
     };
     let html = primary.map(renderBtn).join("");
     if (secondary.length) {
@@ -423,6 +427,8 @@
       return r ? r.positiveCount + r.negativeCount : 0;
     };
     const items = L.filter(x => {
+      // 同一 Quality 判定先於搜尋、個人分類與排序，涵蓋所有新增入口。
+      if (!(document.getElementById("advBox") && document.getElementById("advBox").open) && window.PromptComposer.isQualityWord(x.e)) return false;
       // 18+ 關閉：成人標籤完全不出現（存取限制不變）
       if (!state.adult && isAdultCat(x.c)) return false;
       // 搜尋：维持原本比對，命中才納入
@@ -793,6 +799,7 @@
   }
 
   const Tags = {
+    refresh() { renderAll(true); },
     init() {
       els.cats = $("cats");
       els.tags = $("tags");

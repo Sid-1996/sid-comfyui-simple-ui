@@ -22,8 +22,9 @@ let restored = null;
 const calls = { restore: 0, toast: [], openModal: 0, closeModal: 0, closeLightbox: 0, reuse: 0, warn: 0 };
 const store = {};
 const settingsStub = {};
+const finalExtra = { textContent: "" };
 const els = {
-  modalBody: { innerHTML: "", scrollTop: 0, querySelector: () => null },
+  modalBody: { innerHTML: "", scrollTop: 0, querySelector: selector => selector === "#caFinalExtra" ? finalExtra : null },
   pos: { value: "目前補充" },
   neg: { value: "worst quality" }
 };
@@ -62,6 +63,7 @@ function test(name, fn) {
 }
 const click = data => api.caOnClick({ target: { closest: () => ({ dataset: data }) } });
 const html = () => els.modalBody.innerHTML;
+const candidateHtml = () => html().split('<section class="prompt-diff ca-final"')[0];
 
 test("19 預覽視窗結構：方向說明、8 快捷、10 分類、兩欄預覽", () => {
   currentSel = [{ t: "hatsune miku", w: 1 }];
@@ -72,6 +74,8 @@ test("19 預覽視窗結構：方向說明、8 快捷、10 分類、兩欄預覽
   assert.equal((html().match(/data-ca="cat"/g) || []).length, 10);
   assert.ok(html().includes("歷史圖片中將被替換的標籤") && html().includes("將從目前提示詞帶入的標籤"));
   assert.ok(html().includes("補充描述"));
+  assert.ok(html().includes("分類套用後 Positive") && html().includes("caFinalTags"));
+  assert.ok(html().includes("2b (nier:automata)") && html().includes("classroom"));
 });
 
 test("20 只換角色預覽：專名預勾、通用特徵⚠未勾、無提交", () => {
@@ -98,6 +102,7 @@ test("21 逐項取消與補充描述合併，確認只提交一次", () => {
   assert.ok(html().includes('id="caExtraText"'), "合併模式應出現文字框");
   api.caOnInput({ target: { id: "caExtraText", value: "目前補充, 新文字" } });
   assert.equal(api.CA.extraText, "目前補充, 新文字");
+  assert.equal(finalExtra.textContent, "目前補充, 新文字", "最終 Positive 預覽應即時更新");
   // 確認
   click({ ca: "apply" });
   assert.equal(calls.restore, before + 1, "必須恰好提交一次");
@@ -137,7 +142,7 @@ test("24 分類資料缺失：白話提示，停用新功能但保留完整套�
   } finally { win.TagCategories = saved; }
   assert.equal(calls.openModal, before, "不應開啟預覽");
   assert.ok(calls.toast.some(x => String(x[0]).includes("分類資料沒有載入")), "要有白話提示");
-  assert.ok(calls.toast.some(x => String(x[0]).includes("用同提示詞")), "要引導使用完整套用");
+  assert.ok(calls.toast.some(x => String(x[0]).includes("還原已保存的提示詞狀態")), "要引導使用明確的還原操作");
 });
 
 // ==== 審查修正回歸：body 候選與角色模式狀態 ====
@@ -167,7 +172,7 @@ test("26 取消 character 後跨分類候選消失，CA.role 同步關閉", () =
   assert.equal(api.CA.role, false);
   assert.ok(!api.CA.cats.has("character"));
   for (const t of ["hatsune miku (cosplay)", BODY_WORK, "smile"]) {
-    assert.ok(!html().includes(t), "不應殘留跨分類候選：" + t);
+    assert.ok(!candidateHtml().includes(t), "不應殘留跨分類候選：" + t);
   }
 });
 
@@ -206,7 +211,7 @@ test("29 再次點擊只換角色，狀態與預設完全恢復", () => {
   assert.equal(api.CA.overrides.size, 0, "快捷應清掉手動覆寫");
   assert.ok(/class="rev-tag on"[^>]*data-id="history:2b \(nier:automata\)"/.test(html()));
   assert.ok(/class="rev-tag"[^>]*data-id="history:long hair"/.test(html()));
-  assert.ok(!html().includes("classroom"), "背景分類應被清除");
+  assert.ok(!candidateHtml().includes("data-id=\"history:classroom\""), "背景分類候選應被清除");
 });
 
 // ==== 審查修正回歸：chip 即時勾選狀態以 CA.checked 為唯一來源 ====
@@ -383,7 +388,7 @@ test("38 新文案：標題與替換方向以歷史圖片為基底", () => {
   currentSel = [{ t: "hatsune miku", w: 1 }];
   api.caOpen({ sel: [{ t: "2b (nier:automata)", w: 1 }, { t: "classroom", w: 1 }], extra: "歷史文字" });
   assert.equal(modalTitle, "按分類替換提示詞");
-  assert.ok(html().includes("選取分類後，歷史圖片中相同分類的標籤會由目前提示詞的內容取代；沒有選取的分類會保留歷史圖片原本的內容。"));
+  assert.ok(html().includes("替換來源：目前提示詞；寫入目標：目前提示詞。已選分類會用目前同分類內容取代歷史內容；未選分類保留歷史內容。"));
   assert.ok(html().includes("快速替換（先預覽，確認後才會套用）"));
   assert.ok(html().includes("選擇要替換的分類（可多選）"));
 });
@@ -397,9 +402,9 @@ test("39 新文案：左右欄方向、補充描述三選項與預覽標籤", ()
   assert.ok(h.includes("這些標籤原本屬於歷史圖片，套用後會由目前提示詞中相同分類的標籤取代。"));
   assert.ok(h.includes("將從目前提示詞帶入的標籤"));
   assert.ok(h.includes("這些標籤會從目前提示詞帶入，取代歷史圖片中選取分類的內容。⚠ 表示需要你確認；角色專屬服裝與表情不會自動帶入。"));
-  assert.ok(h.includes("保留目前的補充描述（推薦）"));
-  assert.ok(h.includes("改用這張歷史圖片的補充描述"));
-  assert.ok(h.includes("合併目前與歷史圖片的補充描述（自動去重）"));
+  assert.ok(h.includes("補充描述：保留目前內容（不讀歷史文字）"));
+  assert.ok(h.includes("補充描述：以歷史圖片文字取代目前內容"));
+  assert.ok(h.includes("補充描述：目前內容＋歷史圖片文字（去重合併）"));
   assert.ok(h.includes("目前提示詞：") && h.includes("歷史圖片："));
 });
 
@@ -419,6 +424,22 @@ test("40 文案改名後 caCommit 替換方向不變：歷史標籤被目前標�
   assert.ok(!JSON.stringify(restored).includes("sitting"), "歷史標籤應被移除，不是反過來");
   assert.equal(els.neg.value, negBefore, "neg 不得變動");
   assert.deepEqual(Object.keys(store), [], "keep 模式不寫 ui.extra");
+});
+
+test("41 舊歷史缺 sel 時阻止分類替換；缺 extra 時禁止取代或合併", () => {
+  const modalBefore = calls.openModal;
+  const restoreBefore = calls.restore;
+  const extraBefore = els.pos.value;
+  api.caOpen({ extra: "沒有標籤資料" });
+  assert.equal(calls.openModal, modalBefore, "sel 缺失時不開啟可套用預覽");
+  assert.equal(calls.restore, restoreBefore);
+  api.caOpen({ sel: [] });
+  assert.ok(html().includes('data-mode="replace" disabled'));
+  assert.ok(html().includes('data-mode="merge" disabled'));
+  api.caOnChange({ target: { dataset: { ca: "extra", mode: "replace" } } });
+  assert.equal(api.CA.extraMode, "keep", "缺少歷史文字時不得切換到清除／合併模式");
+  assert.equal(els.pos.value, extraBefore);
+  assert.equal(calls.restore, restoreBefore);
 });
 
 console.log("\n" + passed + " UI tests passed");

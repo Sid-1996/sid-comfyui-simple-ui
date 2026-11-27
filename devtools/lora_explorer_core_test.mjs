@@ -12,7 +12,7 @@ const a = src.indexOf("/* ==== CIVITAI_CORE_START");
 const b = src.indexOf("/* ==== CIVITAI_CORE_END");
 assert.ok(a >= 0 && b > a, "找不到 CIVITAI_CORE 標記");
 const C = new Function(src.slice(a, b) + `
-return { CV_LEVELS, cvText, cvClassify, cvBestVersion, cvSortItems, cvStatusKey, cvVersionUrl };`)();
+return { CV_LEVELS, cvText, cvClassify, cvBestVersionInfo, cvBestVersion, cvImageSafety, cvSortItems, cvStatusKey, cvVersionUrl };`)();
 
 let passed = 0;
 function test(name, fn) {
@@ -137,6 +137,73 @@ test("12 真實案例 43820：同作品三版本各自分類", () => {
   assert.deepEqual(versions.map(v => C.cvClassify(v.baseModel, v.baseModelType, "Illustrious").key),
     ["exact", "bad", "bad"]);
   assert.equal(C.cvBestVersion(versions, "Illustrious").key, "exact");
+});
+
+test("13 最佳版本 helper：版本物件／索引／分類三者一致", () => {
+  const versions = [
+    { id: 11, baseModel: "Pony", baseModelType: "Standard", images: [{ id: 1 }] },
+    { id: 22, baseModel: "Illustrious", baseModelType: "Standard", images: [{ id: 2 }] },
+    { id: 33, baseModel: "SD 1.5", baseModelType: "Standard", images: [{ id: 3 }] }
+  ];
+  const info = C.cvBestVersionInfo(versions, "Illustrious");
+  assert.equal(info.index, 1);
+  assert.equal(info.version, versions[1]);
+  assert.equal(info.cls.key, "exact");
+  assert.equal(info.cls.key, C.cvBestVersion(versions, "Illustrious").key);
+  assert.deepEqual(info.version.images.map(x => x.id), [2]);
+});
+test("14 同級版本保持穩定順序（不被圖片或其他版本取代）", () => {
+  const versions = [
+    { id: 1, baseModel: "Illustrious", baseModelType: "Standard", images: [{ id: 101 }] },
+    { id: 2, baseModel: "Illustrious", baseModelType: "Standard", images: [{ id: 102 }] },
+    { id: 3, baseModel: "NoobAI", baseModelType: "Standard", images: [{ id: 103 }] }
+  ];
+  const info = C.cvBestVersionInfo(versions, "Illustrious");
+  assert.equal(info.index, 0);
+  assert.equal(info.version.id, 1);
+  assert.equal(info.cls.key, "exact");
+});
+test("15 沒有版本／沒有圖片時回空版本，不明確指向別的版本", () => {
+  const empty = C.cvBestVersionInfo([], "Illustrious");
+  assert.equal(empty.version, null);
+  assert.equal(empty.index, -1);
+  assert.equal(empty.cls.key, "unknown");
+  const noImages = C.cvBestVersionInfo([
+    { id: 1, baseModel: "Illustrious", baseModelType: "Standard" }
+  ], "Illustrious");
+  assert.equal(noImages.version.id, 1);
+  assert.equal(noImages.cls.key, "exact");
+});
+test("16 未知 Checkpoint 時最佳版本仍保守：只回 unknown", () => {
+  const versions = [
+    { id: 1, baseModel: "Illustrious", baseModelType: "Standard", images: [{ id: 1 }] },
+    { id: 2, baseModel: "Pony", baseModelType: "Standard", images: [{ id: 2 }] }
+  ];
+  const info = C.cvBestVersionInfo(versions, null);
+  assert.equal(info.index, 0);
+  assert.equal(info.cls.key, "unknown");
+  assert.equal(info.cls.level, 2);
+});
+
+test("17 cvImageSafety：真實形狀公開圖片在成熟內容關閉時可見", () => {
+  const safe = { url: "https://image.civitai.com/a/original=true/1.jpeg", publicSafe: true, mature: false, unknown: false, nsfwLevel: 1 };
+  assert.equal(C.cvImageSafety(safe, { nsfw: false }, false), true);
+  assert.equal(C.cvImageSafety(safe, { nsfw: false }, true), true);
+});
+test("18 cvImageSafety：成熟／未知／模型層級 nsfw 在關閉時都受保護", () => {
+  const mature = { publicSafe: false, mature: true, unknown: false };
+  const unknown = { publicSafe: false, mature: false, unknown: true };
+  const safe = { publicSafe: true, mature: false, unknown: false };
+  assert.equal(C.cvImageSafety(mature, { nsfw: false }, false), false);
+  assert.equal(C.cvImageSafety(unknown, { nsfw: false }, false), false);
+  assert.equal(C.cvImageSafety(safe, { nsfw: true }, false), false, "模型層級 nsfw 保護不可消失");
+  // 既有行為：成熟模式顯示全部
+  assert.equal(C.cvImageSafety(mature, { nsfw: false }, true), true);
+  assert.equal(C.cvImageSafety(unknown, { nsfw: false }, true), true);
+});
+test("19 cvImageSafety：null 與缺少 publicSafe 的圖片不公開", () => {
+  assert.equal(C.cvImageSafety(null, null, false), false);
+  assert.equal(C.cvImageSafety({ mature: false, unknown: false }, null, false), false);
 });
 
 console.log(passed + " tests passed" + (process.exitCode ? "（有失敗）" : ""));

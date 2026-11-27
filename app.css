@@ -695,7 +695,8 @@ h1, h2, h3, p { margin: 0; }
 .shot:hover .shot-meta, .shot:focus-within .shot-meta { opacity: 1; }
 .shot-actions {
   position: absolute; top: 8px; right: 8px;
-  display: flex; gap: 5px;
+  display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px;
+  max-width: calc(100% - 16px);
   opacity: 0; transform: translateY(-4px);
   transition: all var(--dur);
 }
@@ -982,6 +983,15 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
   border-radius: var(--r-sm);
   font-size: 11.5px; line-height: 1.6; color: var(--text-2);
 }
+/* Civitai API Key 管理：緊湊一列，不新增頁面；hover 不改變尺寸 */
+.cv-key-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+.cv-key-status { margin-right: auto; font-size: 11.5px; line-height: 1.6; color: var(--text-2); }
+.cv-key-form { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.cv-key-form input { flex: 1; min-width: 0; }
+.cv-key-result { margin: 0 0 8px; font-size: 11.5px; line-height: 1.6; color: var(--text-2); }
+.cv-key-result.ok { color: var(--ok); }
+.cv-key-result.err { color: var(--err); }
+.cv-key-note { margin: 0 0 10px; font-size: 11px; line-height: 1.6; }
 .cv-search-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
 .cv-search-row input { flex: 1; min-width: 0; }
 .cv-search-row select { flex: none; max-width: 130px; }
@@ -998,7 +1008,20 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
   background: var(--bg-2); border: 1px solid var(--border);
   border-radius: 12px;
 }
-.cv-card-head { display: grid; gap: 2px; }
+.cv-card-main { display: flex; gap: 10px; align-items: flex-start; }
+.cv-card-head { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.cv-thumb {
+  position: relative; flex: none;
+  width: 64px; height: 80px; padding: 0; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; cursor: pointer;
+}
+.cv-thumb-none { cursor: default; }
+.cv-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.cv-thumb img[hidden] { display: none; }
+.cv-thumb-ph { position: absolute; inset: 0; display: grid; place-items: center; font-size: 10px; color: var(--muted-2); }
+/* hover 只改邊框顏色，不改尺寸（避免閃爍） */
+.cv-thumb:hover:not(.cv-thumb-none) { border-color: var(--accent-2); }
 .cv-card-title { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; }
 .cv-card-title b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cv-nsfw {
@@ -1026,7 +1049,37 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .cv-words, .cv-file { font-size: 11px; line-height: 1.6; color: var(--text-2); word-break: break-word; }
 .cv-link { font-size: 11.5px; color: var(--accent-2); text-decoration: none; }
 .cv-link:hover { color: var(--text); text-decoration: underline; }
+.cv-pv { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 16px; }
+.cv-pv-stage {
+  width: 180px; height: 225px; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 10px; display: grid; place-items: center;
+}
+.cv-pv-main { width: 100%; height: 100%; object-fit: contain; display: block; }
+.cv-pv-stage.failed .cv-pv-main { display: none; }
+.cv-pv-stage.failed::after { content: "預覽圖暫時無法載入"; font-size: 11px; color: var(--muted); }
+.cv-pv-info { min-width: 0; }
+.cv-pv-info h3 { margin: 0 0 6px; font-size: 14px; }
+.cv-pv-strip { display: flex; gap: 6px; margin-top: 8px; overflow-x: auto; padding-bottom: 4px; }
+.cv-pv-thumb {
+  flex: none; width: 48px; height: 60px; padding: 0; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 6px; cursor: pointer;
+}
+.cv-pv-thumb.on { border-color: var(--accent-2); box-shadow: 0 0 0 1px var(--accent-2); }
+.cv-pv-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .lora-list { display: grid; gap: 6px; }
+.lora-backup-notice {
+  display: grid; gap: 6px; max-height: 56px; overflow: auto; padding: 7px 8px;
+  border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2);
+  color: var(--muted); font-size: 11px; line-height: 1.45;
+}
+.lora-backup-notice[hidden] { display: none; }
+.lora-backup-head { color: var(--warn); font-weight: 700; }
+.lora-backup-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lora-backup-row b { color: var(--text); }
+.lora-backup-actions { display: flex; flex: 0 0 auto; gap: 4px; }
+.lora-backup-row .btn { flex: 0 0 auto; }
 .lora-row {
   display: grid; gap: 4px;
   padding: 7px 9px;
@@ -1185,6 +1238,38 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
   color: var(--muted);
 }
 .lora-trig-chip button[data-lora-act="del-trig"]:hover { background: var(--err); color: #fff; }
+/* Phase 2：個人詞與作者建議分區；固定空間、hover 不改變尺寸 */
+.lora-trig-panel { max-height: 64vh; overflow: auto; }
+.lora-section { display: grid; gap: 6px; }
+.lora-personal { padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.lora-section-title { font-size: 11.5px; font-weight: 600; color: var(--text-2); }
+.lora-group {
+  display: grid; gap: 5px;
+  padding: 6px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.lora-group-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 11px; }
+.lora-group-words { display: flex; flex-wrap: wrap; gap: 4px; max-height: 86px; overflow: auto; }
+.lora-word {
+  max-width: 180px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 2px 6px;
+  font: 10.5px/1.5 var(--font);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.lora-word:hover { background: var(--accent-weak); color: var(--text); }
+.lora-cv-link { display: flex; align-items: center; gap: 6px; }
+.lora-cv-link input { flex: 1; min-width: 0; }
+.lora-cv-help { display: grid; gap: 3px; }
+.lora-cv-example { font-size: 10px; line-height: 1.5; word-break: break-all; }
+.lora-status { font-size: 10.5px; line-height: 1.5; color: var(--muted); word-break: break-word; }
+.lora-status.bad { color: var(--err); }
 @media (max-width: 900px) {
   .lora-pick-grid { grid-template-columns: 1fr; }
   .lora-pick-list { max-height: 40vh; }
@@ -1388,6 +1473,32 @@ button.sort-mode.manual:hover { background: rgba(139, 124, 255, .24); color: #ff
 .modal-body h3:first-child { margin-top: 0; }
 .modal-body p, .modal-body li { color: var(--text-2); }
 .modal-body ol, .modal-body ul { margin: 6px 0; padding-left: 20px; }
+.prompt-diff {
+  display: grid; gap: 10px; margin: 12px 0; padding: 12px;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.prompt-diff h3, .prompt-diff h4 { margin: 0 0 5px; font-size: 13px; }
+.prompt-diff pre {
+  max-height: 120px; overflow: auto; margin: 0; padding: 8px;
+  white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 6px;
+  background: var(--surface); color: var(--text-2); font: inherit;
+}
+.prompt-diff-cols { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.rv-apply-preview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.prompt-diff-cols section, .rv-apply-preview section { min-width: 0; }
+.prompt-diff-cols section:nth-child(1) h3, .rv-apply-preview section:first-child h4 { color: var(--ok); }
+.prompt-diff-cols section:nth-child(2) h3 { color: var(--err); }
+.prompt-diff-cols section:nth-child(3) h3 { color: var(--muted); }
+.prompt-diff-cols section:nth-child(4) h3 { color: var(--accent); }
+.ca-final { border-color: var(--accent-line); }
+.rv-apply-preview { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.rv-apply-preview > h3, .rv-apply-preview > #rvApplyPreviewBody { grid-column: 1 / -1; }
+.rv-apply-preview #rvApplyPreviewBody { display: grid; grid-template-columns: inherit; gap: 10px; min-width: 0; }
+.rv-apply-preview ul { max-height: 120px; overflow: auto; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .prompt-diff-cols, .rv-apply-preview, .rv-apply-preview #rvApplyPreviewBody { grid-template-columns: 1fr; }
+}
 .modal-body kbd {
   display: inline-block;
   padding: 1px 6px; margin: 0 1px;

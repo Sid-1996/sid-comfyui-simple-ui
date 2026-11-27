@@ -200,6 +200,7 @@
             </div>
           </div>
           <div id="loraList" class="lora-list"></div>
+          <div id="loraBackupNotice" class="lora-backup-notice" role="status" aria-live="polite" hidden></div>
         </div>
 
         <label class="switch-row">
@@ -273,8 +274,9 @@
     <div class="lb-actions">
       <button id="lbDownload" class="btn btn-ghost btn-sm" type="button">下載</button>
       <button id="lbSeed" class="btn btn-ghost btn-sm" type="button">用同種子</button>
-      <button id="lbPrompt" class="btn btn-ghost btn-sm" type="button">用同提示詞</button>
-      <button id="lbApply" class="btn btn-ghost btn-sm" type="button">分類套用</button>
+      <button id="lbPrompt" class="btn btn-ghost btn-sm" type="button">套用正向提示詞</button>
+      <button id="lbRestore" class="btn btn-ghost btn-sm" type="button">還原已保存的提示詞狀態</button>
+      <button id="lbApply" class="btn btn-ghost btn-sm" type="button">分類替換</button>
       <button id="lbDel" class="btn btn-ghost btn-sm danger" type="button">刪除</button>
       <button id="lbClose" class="btn btn-ghost btn-icon" type="button" aria-label="關閉">✕</button>
     </div>
@@ -343,14 +345,19 @@
             <div id="revSelList" class="rev-picked-list"></div>
           </div>
 
-          <p class="meta">標籤分數僅供參考。反推結果不會自動加入；請點選想保留的標籤，再按「加入提示詞」。切換分類不會清除其他分類已選的項目。</p>
+          <p class="meta">來源：正在分析的圖片。候選：WD14 反推標籤。目標：目前提示詞。選取後按「加入目前提示詞」；只會新增，不會移除既有內容，重複項目會略過。切換分類不會清除其他分類已選項目。</p>
         </div>
       </div>
+
+      <section id="revApplyPreview" class="prompt-diff rv-apply-preview" aria-label="反推標籤加入預覽" aria-live="polite">
+        <h3>確認前預覽：加入目前提示詞</h3>
+        <div id="rvApplyPreviewBody"></div>
+      </section>
 
       <div class="modal-foot">
         <span id="revFootMeta" class="meta" style="margin-right:auto"></span>
         <button type="button" class="btn btn-ghost" id="revClose2">關閉</button>
-        <button type="button" class="btn btn-soft" id="revApply" disabled>加入提示詞（0）</button>
+        <button type="button" class="btn btn-soft" id="revApply" disabled>加入目前提示詞（0）</button>
       </div>
     </div>
   </div>
@@ -365,6 +372,19 @@
     </div>
     <div class="modal-body">
       <p id="cvCkptInfo" class="cv-ckpt-info">正在辨識目前 Checkpoint…</p>
+      <div id="cvKeyBar" class="cv-key-bar">
+        <span id="cvKeyStatus" class="cv-key-status">正在讀取 Civitai API Key 狀態…</span>
+        <button type="button" class="btn btn-ghost btn-sm" id="cvKeyEdit">設定</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="cvKeyTest" hidden>測試連線</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="cvKeyRemove" hidden>移除</button>
+      </div>
+      <div id="cvKeyForm" class="cv-key-form" hidden>
+        <input id="cvKeyInput" type="password" placeholder="貼上你的 Civitai API Key" autocomplete="off" spellcheck="false" aria-label="Civitai API Key">
+        <button type="button" class="btn btn-soft btn-sm" id="cvKeySave">儲存</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="cvKeyCancel">取消</button>
+      </div>
+      <p id="cvKeyResult" class="cv-key-result" aria-live="polite" hidden></p>
+      <p class="cv-key-note meta">這是<b>你自己的</b> Civitai API Key。Full Access 金鑰可能有較高權限（包含消耗 Buzz 的操作），請自行管理與撤銷；DPAPI 加密無法抵禦同一 Windows 使用者權限下的惡意程式。Civitai 官方對第三方 App 建議使用 OAuth；本專案為了自架的低設定門檻改用個人 API Key。</p>
       <div class="cv-search-row">
         <input id="cvSearch" type="search" placeholder="搜尋 Civitai 公開 LoRA" autocomplete="off" aria-label="搜尋 LoRA">
         <select id="cvSort" aria-label="排序">
@@ -432,8 +452,10 @@
 </div>
 
 <script src="/dict.js"></script>
+<script src="/prompt_core.js"></script>
 <script src="/tags.js"></script>
 <script src="/tag_categories.js"></script>
+<script src="/lora_migration.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

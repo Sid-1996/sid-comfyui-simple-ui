@@ -239,19 +239,17 @@ test("17 caCommit 只呼叫一次 Tags.restore", () => {
   assert.equal(n, 1, "還原提交應恰好一次，實際 " + n);
 });
 
-// 18. 完整套用未被改動
-test("18 既有 reusePrompt 完整套用語意不變", () => {
-  const expected = [
-    'function reusePrompt(it) {',
-    '    window.Tags.restore(it.sel || []);',
-    '    $("pos").value = it.extra || "";',
-    '    try { localStorage.setItem("ui.extra", $("pos").value); } catch (e) { /* ignore */ }',
-    '    if (it.neg) { $("neg").value = it.neg; persistSettings(); }',
-    '    updateWarn();',
-    '    toast("已套用這張圖的提示詞", "ok");',
-    '  }'
-  ].join("\n");
-  assert.ok(appSrc.replace(/\r\n/g, "\n").includes(expected), "reusePrompt 被修改");
+// 18. 歷史正向套用與已保存狀態還原分流，欄位缺失時保護目前內容
+test("18 history operations separate positive apply and confirmed saved-state restore", () => {
+  assert.match(appSrc, /function reuseTextPrompt\(it\)/);
+  assert.match(appSrc, /function buildReusePlan\(it\)/);
+  assert.match(appSrc, /function commitReuse\(plan\)/);
+  assert.match(appSrc, /data-reuse="confirm"/);
+  assert.match(appSrc, /function hasPositiveSnapshot\(item\)/);
+  assert.match(appSrc, /將這張歷史圖片的正向標籤與補充描述套用到目前提示詞；目前 Negative、LoRA 與生成設定不會改變。/);
+  assert.match(appSrc, /還原已保存的提示詞狀態/);
+  assert.match(appSrc, /negAction: Object\.prototype\.hasOwnProperty\.call\(item, "neg"\) && typeof item\.neg === "string" \? "replace" : "keep"/);
+  assert.doesNotMatch(appSrc, /function reuseTextPrompt\(it\)[\s\S]*?item\.neg/);
 });
 
 // ==== 審查修正回歸測試：body 跨分類候選 ====

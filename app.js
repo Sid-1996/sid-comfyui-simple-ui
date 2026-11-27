@@ -32,15 +32,22 @@
     gallery: loadJSON("ui.gallery", []),
     results: [], lbList: [], lbIndex: 0, queue: 0,
     ws: null, t0: 0, seedUsed: null,
-    loras: [], loraList: [], loraListState: "idle", loraListError: "", loraMeta: {},
+    loras: [], loraMigration: null, loraMigrationBlocked: false,
+    loraList: [], loraListState: "idle", loraListError: "", loraMeta: {},
+    // Civitai 作者建議的暫時狀態（錯誤/讀取中），不進 localStorage
+    loraCiv: {},
     civitai: {
       ckptName: "", ckpt: null, ckptState: "idle", ckptError: "",
       query: "", sort: "Highest Rated", period: "AllTime", nsfw: false,
       items: [], nextCursor: null, state: "idle", error: "",
-      statusSeq: 0, searchSeq: 0, statusReq: null, searchReq: null, debounce: null
+      statusSeq: 0, searchSeq: 0, statusReq: null, searchReq: null, debounce: null,
+      // API Key 狀態只在記憶體；Key 本身永不進 localStorage／DOM 持久狀態
+      key: { configured: false, username: "", tier: "", error: "", state: "idle",
+             formOpen: false, busy: false, result: "", resultKind: "" }
     }
   };
   S.gallery = Array.isArray(S.gallery) ? S.gallery.slice(0, 24) : [];
+  let PV = null;   // 模型詳細預覽的當前狀態（不進 localStorage）
 
   /* ── 小工具 ────────────────────────────────────────────── */
   function toast(msg, kind, ms) {
@@ -304,11 +311,16 @@
   }
 
   /* ── 生成 ──────────────────────────────────────────────── */
-  function composePrompt() {
-    const base = window.Tags.buildPrompt();
-    const q = S.settings.quality ? QUALITY : "";
-    const lora = loraTokensFromSnapshot(loraSnapshot(S.loras)).join(", ");
-    return [q + base, lora].filter(Boolean).join(", ").replace(/^[,\s]+|[,\s]+$/g, "");
+  function composePrompt() { return composeCurrentPrompt().pos; }
+
+  function composeCurrentPrompt(selected) {
+    const posEl = $("pos") || {};
+    const negEl = $("neg") || {};
+    const model = window.PromptComposer.derivePromptModel({
+      sel: Array.isArray(selected) ? selected : window.Tags.snapshot(), extra: posEl.value || "", loras: S.loras,
+      qualityTags: S.settings.quality === true, negativeRaw: negEl.value == null ? "" : negEl.value
+    }, { Dict: window.Dict });
+    return { model, result: window.PromptComposer.compose(model, { defaultNegative: DEFAULT_NEG }) };
   }
 
   // 生成前取「完整且一致」的快照：標籤狀態（深拷貝）+ 組裝好的提示詞 + 負面 + 設定
@@ -317,20 +329,22 @@
     const sel = window.Tags.snapshot();
     const posEl = $("pos") || {};
     const negEl = $("neg") || {};
-    const extra = window.Dict.tr(posEl.value || "").trim();
-    // LoRA 觸發詞是獨立的來源，只附加在最後；不進 sel、不覆寫使用者輸入
+    const composed = composeCurrentPrompt(sel);
+    // LoRA 觸發詞維持獨立來源；Composer 只負責組裝，不改持久化欄位。
     const loras = loraSnapshot(S.loras);
-    const loraTokens = loraTokensFromSnapshot(loras);
-    const parts = sel.map(s => s.w === 1 ? s.t : `(${s.t}:${s.w.toFixed(1)})`);
-    if (extra) parts.push(extra);
-    parts.push(...loraTokens);
-    const pos = ((S.settings.quality ? QUALITY : "") + parts.join(", "))
-      .replace(/^[,\s]+|[,\s]+$/g, "");
     return {
       sel,
-      pos,
-      neg: negEl.value || "",
-      extraRaw: (posEl.value || "").trim(),
+      pos: composed.result.pos,
+      neg: composed.result.neg,
+      posHash: composed.result.posHash,
+      promptModel: composed.model,
+      entries: composed.result.snapshotEntries,
+      snapshotEntries: composed.result.snapshotEntries,
+      effective: composed.result.effective,
+      negativeEntries: composed.result.negativeEntries,
+      effectiveNegative: composed.result.effectiveNegative,
+      negativeParse: composed.result.negativeParse,
+      extraRaw: posEl.value || "",
       ckpt: $("ckpt") ? $("ckpt").value : "",
       w: S.settings.size.split("x").map(Number)[0],
       h: S.settings.size.split("x").map(Number)[1],
@@ -338,8 +352,7 @@
       steps: Number($("steps").value) || 25,
       cfg: Number($("cfg").value) || 6,
       seed: readSeed(),
-      loras,
-      loraTokens
+      loras
     };
   }
 
@@ -384,17 +397,21 @@
   /* ==== LORA_CORE_START ====
      純資料層：不碰 DOM、localStorage、網路。
      devtools/lora_core_test.mjs 直接擷取這一段做無瀏覽器測試。  */
-  const LORA_VERSION = 1;
+  const LORA_VERSION = 2;
   const LORA_DEFAULT_WEIGHT = 0.8;     // 角色 LoRA 常見起始值；兩個 strength 共用
   const LORA_UI_MIN = -2;
   const LORA_UI_MAX = 2;
   const LORA_LIMIT = 100;              // ComfyUI LoraLoader 的節點上限（-100～100）
   const LORA_MAX_TRIGGERS = 40;
   const LORA_EXT = ".safetensors";
+  // 作者建議的上限；與個人觸發詞分開，避免單一異常來源撐爆介面
+  const LORA_AUTHOR_GROUPS = 20;
+  const LORA_AUTHOR_WORD_LEN = 200;
+  const LORA_AUTHOR_ITEM_LEN = 4000;
 
   // 觸發詞比對：大小寫、底線、多餘空白都視為同一個
   function loraNorm(s) {
-    return String(s == null ? "" : s).toLowerCase().trim().replace(/[_\s]+/g, " ");
+    return String(s == null ? "" : s).normalize("NFKC").toLowerCase().trim().replace(/[_\s]+/g, " ");
   }
 
   // 非數值一律回預設；超過節點極限才夾住，不把合理範圍限死
@@ -425,7 +442,8 @@
     return parts.join(" / ");
   }
 
-  function loraCleanTriggers(list) {
+  // 只清理與去重，不套用個人詞 40 上限；供「統計未加入數量」使用。
+  function loraCleanTriggerList(list) {
     const out = [], seen = new Set();
     (Array.isArray(list) ? list : []).forEach(raw => {
       const t = String(raw == null ? "" : raw).replace(/[\r\n]+/g, " ").trim();
@@ -435,34 +453,232 @@
       seen.add(k);
       out.push(t);
     });
-    return out.slice(0, LORA_MAX_TRIGGERS);
+    return out;
   }
 
-  // 讀入（可能是舊版／損壞的）ui.loras；單筆壞掉只跳過該筆
-  function loraParseItems(raw) {
-    const src = raw && typeof raw === "object" && Array.isArray(raw.items) ? raw.items : [];
-    const out = [], seen = new Set();
-    src.forEach(it => {
-      if (!it || typeof it !== "object") return;
-      const name = typeof it.name === "string" ? it.name.trim() : "";
-      if (!loraNameOk(name) || seen.has(name.toLowerCase())) return;
-      seen.add(name.toLowerCase());
-      out.push({
-        name,
-        display: typeof it.display === "string" && it.display.trim()
-          ? it.display.trim().slice(0, 200) : loraDisplay(name),
-        strength: loraWeight(it.strength),
-        triggers: loraCleanTriggers(it.triggers),
-        autoTrigger: it.autoTrigger !== false,
-        enabled: it.enabled !== false
-      });
+  // 個人詞的保存上限仍舊是 40；截斷只在這裡發生。
+  function loraCleanTriggers(list) {
+    return loraCleanTriggerList(list).slice(0, LORA_MAX_TRIGGERS);
+  }
+
+  // 計算「加入作者建議到個人詞」的實際結果。
+  // 回報數量必須等於保存前後的差值，不能先把未受上限截斷的數量報給使用者。
+  function loraAddPlan(existing, words) {
+    const cur = loraCleanTriggers(existing);
+    const clean = loraCleanTriggerList(words);
+    const before = new Set(cur.map(loraNorm));
+    const fresh = clean.filter(t => !before.has(loraNorm(t)));
+    const room = Math.max(0, LORA_MAX_TRIGGERS - cur.length);
+    const taking = fresh.slice(0, room);
+    const next = loraCleanTriggers(cur.concat(taking));
+    return {
+      next,
+      added: Math.max(0, next.length - cur.length),
+      skipped: fresh.length - taking.length,
+      room,
+      duplicates: clean.length - fresh.length
+    };
+  }
+
+  // ── 作者建議（只讀，永不自動注入）────────────────────────
+  // 群組是 string[][]；保留「哪一組有哪些詞」的關係，不攤平成一個字串。
+  function loraNormGroups(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    (raw.slice(0, LORA_AUTHOR_GROUPS)).forEach(g => {
+      if (!Array.isArray(g)) return;
+      const words = loraCleanTriggers(g.filter(x => typeof x === "string"));
+      if (words.length) out.push(words);
     });
     return out;
   }
 
-  function loraParseState(raw) {
-    return { v: LORA_VERSION, items: loraParseItems(raw) };
+  // Civitai trainedWords：每個元素是一整串逗號分隔詞組。先拆詞再乾淨化。
+  function loraCivitaiGroups(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    raw.slice(0, LORA_AUTHOR_GROUPS).forEach(item => {
+      if (typeof item !== "string" || !item.trim() || item.length > LORA_AUTHOR_ITEM_LEN) return;
+      const words = loraCleanTriggers(item.split(/[,\r\n]+/));
+      if (words.length) out.push(words);
+    });
+    return out;
   }
+
+  function loraFingerprint(groups, versionId) {
+    const src = JSON.stringify([versionId == null ? "" : String(versionId), loraNormGroups(groups)]);
+    let h = 2166136261;
+    for (let i = 0; i < src.length; i++) {
+      h ^= src.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(36);
+  }
+
+  function loraAuthorDefault() {
+    return {
+      local: { groups: [] },
+      civitai: { versionId: null, groups: [], fetchedAt: null, fingerprint: null }
+    };
+  }
+
+  // 白名單式解析：只接受已知欄位，壞的建議不能毀掉個人 triggers
+  function loraParseAuthor(raw, fallback) {
+    const a = (raw && typeof raw === "object") ? raw
+      : (fallback && typeof fallback === "object" ? fallback : {});
+    const local = a.local && typeof a.local === "object" ? a.local : {};
+    const c = a.civitai && typeof a.civitai === "object" ? a.civitai : {};
+    const n = Number(c.versionId);
+    const versionId = Number.isFinite(n) && n > 0 && n <= 2147483647 ? Math.floor(n) : null;
+    const t = Number(c.fetchedAt);
+    const fetchedAt = Number.isFinite(t) && t > 0 ? t : null;
+    return {
+      local: { groups: loraNormGroups(local.groups) },
+      civitai: {
+        versionId,
+        groups: loraNormGroups(c.groups),
+        fetchedAt,
+        fingerprint: typeof c.fingerprint === "string" ? c.fingerprint.slice(0, 80) : null
+      }
+    };
+  }
+
+  function loraSuggestionCount(item) {
+    const a = loraParseAuthor(item && item.authorSuggestions);
+    return a.local.groups.concat(a.civitai.groups).reduce((n, g) => n + g.length, 0);
+  }
+
+  // 非阻塞提醒的狀態判斷（純函式，供 devtools 驗證）
+  function loraReminderState(item, suggestionCount) {
+    if (!item || item.enabled === false) return "none";
+    if (item.noTriggerNeeded === true) return "none";
+    const has = Array.isArray(item.triggers) && item.triggers.length > 0;
+    if (has && item.autoTrigger === false) return "autoOff";
+    if (suggestionCount > 0) return "hasSuggestions";
+    return has ? "none" : "missing";
+  }
+
+  function loraAdoptionRecordOk(r) {
+    if (!r || typeof r !== "object" || Array.isArray(r)) return false;
+    const keys = ["adoptionId", "source", "sourceGroupId", "word", "wordKey", "adoptedAt", "via"];
+    if (Object.keys(r).some(k => !keys.includes(k)) || keys.some(k => !Object.prototype.hasOwnProperty.call(r, k))) return false;
+    if (typeof r.adoptionId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(r.adoptionId)) return false;
+    if (typeof r.sourceGroupId !== "string" || !/^g_(unknown_)?[0-9a-f]{8}(\.[1-9][0-9]*)?$/.test(r.sourceGroupId)) return false;
+    if (typeof r.word !== "string" || !r.word.length || r.word.length > 200 || typeof r.wordKey !== "string" || !r.wordKey.length || r.wordKey.length > 200) return false;
+    if (r.wordKey !== loraNorm(r.word) || !Number.isInteger(r.adoptedAt) || r.adoptedAt < 0 || !["word", "group", "all-local", "migration"].includes(r.via)) return false;
+    const s = r.source;
+    if (!s || typeof s !== "object" || Array.isArray(s) || Object.keys(s).some(k => !["kind", "versionId", "localFingerprint", "sourceFingerprint"].includes(k)) ||
+      ["kind", "versionId", "localFingerprint", "sourceFingerprint"].some(k => !Object.prototype.hasOwnProperty.call(s, k))) return false;
+    if (!["author-local", "author-civitai"].includes(s.kind) || !(s.localFingerprint === null || typeof s.localFingerprint === "string") ||
+      !(s.sourceFingerprint === null || typeof s.sourceFingerprint === "string")) return false;
+    return s.kind === "author-civitai"
+      ? Number.isInteger(s.versionId) && s.versionId > 0 && s.versionId <= 2147483647 && s.localFingerprint === null
+      : s.versionId === null;
+  }
+
+  // Parse once into usable v2 items plus explicit backup requests. Migration owns persistence.
+  function loraParseState(raw) {
+    const hasVersion = raw && typeof raw === "object" && Object.prototype.hasOwnProperty.call(raw, "v");
+    const knownVersion = !hasVersion || raw.v === 1 || raw.v === 2;
+    const src = raw && typeof raw === "object" && Array.isArray(raw.items) ? raw.items : [];
+    const migration = { quarantine: [], backups: [], reason: null, needsWrite: !raw || raw.v !== 2, blocked: false };
+    const inferredV2 = !knownVersion && src.some(it => it && typeof it === "object" && Object.prototype.hasOwnProperty.call(it, "personalTriggers"));
+    if (!knownVersion && typeof raw.v === "number") {
+      migration.reason = "unknown-version"; migration.blocked = true;
+      migration.backups.push({ reason: "quarantine", itemName: null, payload: { kind: "raw-json", value: JSON.stringify(raw) }, note: "不支援的 LoRA 版本；未降級解析，原始資料已隔離保全。" });
+      return { v: LORA_VERSION, items: [], migration };
+    }
+    if (!knownVersion) {
+      migration.reason = "invalid-version";
+      migration.backups.push({ reason: "quarantine", itemName: null, payload: { kind: "raw-json", value: JSON.stringify(raw) }, note: "版本欄位無法辨識；依內容推測前已保全整包原始資料。" });
+    }
+    if (raw && typeof raw === "object" && !Array.isArray(raw) && !Array.isArray(raw.items)) {
+      migration.reason = "quarantine"; migration.blocked = true;
+      migration.backups.push({ reason: "quarantine", itemName: null, payload: { kind: "raw-json", value: JSON.stringify(raw) }, note: "LoRA 清單欄位格式錯誤；原始資料已隔離保全。" });
+      return { v: LORA_VERSION, items: [], migration };
+    }
+    if (raw != null && (typeof raw !== "object" || Array.isArray(raw))) {
+      migration.reason = "quarantine"; migration.blocked = true;
+      migration.backups.push({ reason: "quarantine", itemName: null, payload: { kind: "raw-json", value: JSON.stringify(raw) }, note: "LoRA 資料外層格式錯誤；原始資料已隔離保全。" });
+      return { v: LORA_VERSION, items: [], migration };
+    }
+
+    const items = [], seen = new Set();
+    const quarantine = (it, name, reason, note) => {
+      migration.quarantine.push({ itemName: name || null, reason, value: it });
+      const isItemObject = it !== null && typeof it === "object" && !Array.isArray(it);
+      migration.backups.push({ reason: reason === "type-error" ? "type-error" : "quarantine", itemName: isItemObject ? (name || null) : null,
+        payload: isItemObject ? { kind: "item", value: it } : { kind: "raw-json", value: JSON.stringify(it) }, note });
+      migration.reason = "quarantine";
+    };
+    src.forEach(it => {
+      const name = it && typeof it === "object" && typeof it.name === "string" ? it.name.trim() : "";
+      if (!it || typeof it !== "object" || Array.isArray(it) || !loraNameOk(name)) {
+        quarantine(it, name, "quarantine", "無效 LoRA 名稱或資料列；原始資料已隔離保全。"); return;
+      }
+      if (seen.has(name.toLowerCase())) { quarantine(it, name, "quarantine", "重複 LoRA 資料列；原始資料已隔離保全。"); return; }
+      seen.add(name.toLowerCase());
+      const v2 = raw && raw.v === 2 || inferredV2;
+      const hasPersonal = Object.prototype.hasOwnProperty.call(it, "personalTriggers");
+      const hasLegacy = Object.prototype.hasOwnProperty.call(it, "triggers");
+      const personalValid = Array.isArray(it.personalTriggers) && it.personalTriggers.every(x => typeof x === "string");
+      const legacyValid = Array.isArray(it.triggers) && it.triggers.every(x => typeof x === "string");
+      const adoptionValid = Array.isArray(it.adoptionRecords);
+      const adoptionRows = adoptionValid ? it.adoptionRecords.filter(loraAdoptionRecordOk) : [];
+      const badAdoption = adoptionValid && adoptionRows.length !== it.adoptionRecords.length;
+      const author = it.authorSuggestions;
+      const authorShapeOk = author == null || (typeof author === "object" && !Array.isArray(author) &&
+        ["local", "civitai"].every(k => author[k] == null || (typeof author[k] === "object" && !Array.isArray(author[k]) &&
+          (author[k].groups == null || (Array.isArray(author[k].groups) && author[k].groups.every(g => Array.isArray(g) && g.every(w => typeof w === "string")))))));
+      const malformed = (hasPersonal && !personalValid) || (hasLegacy && !legacyValid) ||
+        (v2 && Object.prototype.hasOwnProperty.call(it, "adoptionRecords") && !adoptionValid) || badAdoption || !authorShapeOk ||
+        (Object.prototype.hasOwnProperty.call(it, "display") && typeof it.display !== "string") ||
+        (Object.prototype.hasOwnProperty.call(it, "strength") && (typeof it.strength !== "number" || !Number.isFinite(it.strength))) ||
+        (Object.prototype.hasOwnProperty.call(it, "enabled") && typeof it.enabled !== "boolean") ||
+        (Object.prototype.hasOwnProperty.call(it, "autoTrigger") && typeof it.autoTrigger !== "boolean") ||
+        (Object.prototype.hasOwnProperty.call(it, "noTriggerNeeded") && typeof it.noTriggerNeeded !== "boolean");
+      if (malformed) quarantine(it, name, "type-error", "欄位型別或採用紀錄格式錯誤；有效資料已保留，原始資料已隔離保全。");
+
+      const v2Words = personalValid ? loraCleanTriggerList(it.personalTriggers) : [];
+      const v1Words = legacyValid ? loraCleanTriggerList(it.triggers) : [];
+      let triggers;
+      if (personalValid && legacyValid && v2Words.length === 0 && v1Words.length > 0) {
+        // M6: an intentional v2 empty list wins; persist old words separately before writing.
+        triggers = [];
+        migration.backups.push({ reason: "v1-data-v2-empty", itemName: name,
+          payload: { kind: "item", value: { triggers: it.triggers, personalTriggers: it.personalTriggers } },
+          note: "v2 為有效空陣列；v1 舊詞已保全，不自動合回。" });
+      } else if (personalValid && legacyValid && loraNormList(v2Words) !== loraNormList(v1Words)) {
+        // M5: v2 order wins; append only v1 words not already present by wordKey.
+        triggers = loraCleanTriggerList(v2Words.concat(v1Words));
+        migration.backups.push({ reason: "dual-conflict", itemName: name,
+          payload: { kind: "item", value: { triggers: it.triggers, personalTriggers: it.personalTriggers } },
+          note: "v1 與 v2 觸發詞衝突；已依 wordKey 合併，原始兩欄已保全。" });
+      } else if (v2 && personalValid) triggers = v2Words.slice();
+      else if (personalValid) triggers = v2Words.slice();
+      else if (v2 && hasPersonal) triggers = [];
+      else if (legacyValid) triggers = v1Words.slice();
+      else triggers = [];
+
+      const item = {
+        name, display: typeof it.display === "string" && it.display.trim() ? it.display.trim().slice(0, 200) : loraDisplay(name),
+        strength: loraWeight(it.strength), triggers: loraCleanTriggerList(triggers),
+        adoptionRecords: adoptionRows, autoTrigger: it.autoTrigger !== false, enabled: it.enabled !== false,
+        authorSuggestions: loraParseAuthor(it.authorSuggestions), noTriggerNeeded: it.noTriggerNeeded === true
+      };
+      if (v2 && !Object.prototype.hasOwnProperty.call(it, "adoptionRecords")) {
+        migration.needsWrite = true;
+        if (!migration.reason) migration.reason = "field-missing-v2";
+      }
+      items.push(item);
+    });
+    if (inferredV2) migration.needsWrite = true;
+    return { v: LORA_VERSION, items, migration };
+  }
+
+  function loraNormList(items) { return loraCleanTriggerList(items).map(loraNorm).join("\0"); }
+
+  function loraParseItems(raw) { return loraParseState(raw).items; }
 
   function loraSerialize(items) {
     return {
@@ -471,9 +687,12 @@
         name: it.name,
         display: it.display,
         strength: loraWeight(it.strength),
-        triggers: loraCleanTriggers(it.triggers),
+        personalTriggers: loraCleanTriggerList(it.triggers),
+        adoptionRecords: Array.isArray(it.adoptionRecords) ? it.adoptionRecords : [],
         autoTrigger: !!it.autoTrigger,
-        enabled: !!it.enabled
+        enabled: !!it.enabled,
+        authorSuggestions: loraParseAuthor(it.authorSuggestions),
+        noTriggerNeeded: !!it.noTriggerNeeded
       }))
     };
   }
@@ -491,7 +710,9 @@
     const i = loraFind(list, clean);
     const base = i >= 0 ? Object.assign({}, list[i]) : {
       name: clean, display: loraDisplay(clean), strength: LORA_DEFAULT_WEIGHT,
-      triggers: [], autoTrigger: true, enabled: false
+      triggers: [], autoTrigger: true, enabled: false,
+      authorSuggestions: loraAuthorDefault(), noTriggerNeeded: false,
+      adoptionRecords: [], migrationBackup: null
     };
     const p = patch && typeof patch === "object" ? patch : {};
     if (p.display != null) base.display = String(p.display).trim().slice(0, 200) || loraDisplay(clean);
@@ -499,6 +720,10 @@
     if (p.triggers != null) base.triggers = loraCleanTriggers(p.triggers);
     if (p.autoTrigger != null) base.autoTrigger = !!p.autoTrigger;
     if (p.enabled != null) base.enabled = !!p.enabled;
+    if (p.authorSuggestions != null) {
+      base.authorSuggestions = loraParseAuthor(p.authorSuggestions, base.authorSuggestions);
+    }
+    if (p.noTriggerNeeded != null) base.noTriggerNeeded = !!p.noTriggerNeeded;
     if (i >= 0) list[i] = base; else list.push(base);
     return list;
   }
@@ -513,15 +738,17 @@
   }
 
   // 本次生成要用的固定資料（順序＝使用者加入順序＝Workflow 串接順序）
-  // 職責是「完整保存設定」：即使 autoTrigger 關閉，觸發詞也要留在快照／歷史，
+  // 職責是「完整保存個人設定」：即使 autoTrigger 關閉，觸發詞也要留在快照／歷史，
   // 才能還原。要不要放進 Prompt，由 loraTokensFromSnapshot() 單獨判斷。
+  // 作者建議是「目前 LoRA 的最新 metadata」，不進快照／歷史，避免舊歷史讓它回退。
   function loraSnapshot(items) {
     return loraEnabled(items).map(it => ({
       name: it.name,
       display: it.display || loraDisplay(it.name),
       strength: loraWeight(it.strength),
-      triggers: loraCleanTriggers(it.triggers),
-      autoTrigger: it.autoTrigger !== false
+      personalTriggers: loraCleanTriggerList(it.triggers),
+      autoTrigger: it.autoTrigger !== false,
+      noTriggerNeeded: it.noTriggerNeeded === true
     }));
   }
 
@@ -531,7 +758,7 @@
     const out = [], seen = new Set();
     (Array.isArray(list) ? list : []).forEach(l => {
       if (!l || l.autoTrigger === false) return;
-      const triggers = Array.isArray(l.triggers) ? l.triggers : [];
+      const triggers = Array.isArray(l.personalTriggers) ? l.personalTriggers : (Array.isArray(l.triggers) ? l.triggers : []);
       triggers.forEach(raw => {
         const t = String(raw || "").trim();
         const k = loraNorm(t);
@@ -588,8 +815,15 @@
   }
   /* ==== LORA_CORE_END ==== */
 
-  // 舊資料、損壞資料都安全回退成空清單；不動其他 localStorage key
-  S.loras = loraParseState(loadJSON("ui.loras", null)).items;
+  // Migration operates on an injectable storage in tests; the application only supplies its own store here.
+  const loraLoadResult = window.LoraMigration.readAndMigrate(
+    localStorage, loraParseState,
+    items => loraSerialize(items)
+  );
+  S.loras = loraLoadResult.state.items;
+  S.loraMigration = loraLoadResult.state.migration || null;
+  S.loraMigrationResult = loraLoadResult.result;
+  S.loraMigrationBlocked = !loraLoadResult.result.ok;
 
   /* ==== CIVITAI_CORE_START ====
      純資料層：版本級適配分類與 Strict 排序。不碰 DOM、localStorage、網路。
@@ -645,15 +879,32 @@
       reason: "與目前 Checkpoint 的相容性未知" };
   }
 
-  function cvBestVersion(versions, ckptBase) {
+  // 回傳 {version, index, cls}：卡片圖片必須來自實際被選為最佳適配依據的版本。
+  // 同級不替換（嚴格小於），因此保持既有穩定順序與四級規則。
+  function cvBestVersionInfo(versions, ckptBase) {
     const list = Array.isArray(versions) ? versions : [];
-    if (!list.length) return cvClassify(null, null, ckptBase);
-    let best = null;
-    list.forEach(v => {
+    let best = null, index = -1;
+    list.forEach((v, i) => {
       const c = cvClassify(v && v.baseModel, v && v.baseModelType, ckptBase);
-      if (!best || c.level < best.level) best = c;
+      if (!best || c.level < best.level) { best = c; index = i; }
     });
-    return best;
+    if (!best) return { version: null, index: -1, cls: cvClassify(null, null, ckptBase) };
+    return { version: list[index] || null, index: index, cls: best };
+  }
+
+  function cvBestVersion(versions, ckptBase) {
+    return cvBestVersionInfo(versions, ckptBase).cls;
+  }
+
+  // 成熟內容判斷（卡片縮圖、詳細預覽、切圖共用）。
+  // publicSafe 由後端依官方 nsfw=false 搜尋過濾標記；不解讀 nsfwLevel 數字。
+  // 明確成熟、無法判定、或模型層級 nsfw 的圖片在未開啟成熟內容時一律不顯示。
+  function cvImageSafety(img, model, showMature) {
+    if (!img) return false;
+    if (showMature) return true;              // 沿用既有行為：成熟模式顯示全部
+    if (img.mature || !img.publicSafe) return false;
+    if (model && model.nsfw) return false;    // 模型層級保護維持不變
+    return true;
   }
 
   // 穩定排序：同級內保留 Civitai API 的原始順序
@@ -673,6 +924,30 @@
   }
   /* ==== CIVITAI_CORE_END ==== */
 
+
+  // 非阻塞提醒：只讀取狀態、不改變 Prompt、不擋生成；同一個狀態只提醒一次。
+  const loraReminded = new Set();
+  function loraRemindBeforeGenerate() {
+    const enabled = loraEnabled(S.loras);
+    if (!enabled.length) return;
+    let first = "", count = 0;
+    enabled.forEach(it => {
+      const state = loraReminderState(it, loraSuggestionCount(it));
+      if (state === "none") return;
+      const key = it.name.toLowerCase() + "|" + state;
+      if (loraReminded.has(key)) return;
+      loraReminded.add(key);
+      count++;
+      if (first) return;
+      const name = it.display || loraDisplay(it.name);
+      first = state === "autoOff"
+        ? `${name} 的觸發詞目前不會自動加入 Prompt（到右欄「角色 LoRA → 觸發詞」可開啟）`
+        : state === "hasSuggestions"
+          ? `${name} 有作者建議的觸發詞尚未加入，到右欄「角色 LoRA → 觸發詞」可挑選`
+          : `${name} 還沒設觸發詞；若這個模型不需要，請到右欄按「這個 LoRA 不需要 Trigger Words」`;
+    });
+    if (first) toast(count > 1 ? `${first}（另有 ${count - 1} 個 LoRA）` : first, "warn", 6500);
+  }
 
   async function generate() {
     if (S.running || S.starting) return;
@@ -696,6 +971,9 @@
 
     // ① 選了 LoRA 就先確認它還在本機清單中；無效模型不可靜默略過
     if (!(await verifySelectedLoras())) { syncGo(); return; }
+
+    // ①b 非阻塞提醒：不檢驗 Prompt、不擋生成，也不修改任何設定
+    loraRemindBeforeGenerate();
 
     // ② 生成前同步標籤狀態（#pos 由 snapshotNow 直接讀 DOM，不從 storage 覆蓋）
     if (window.Tags && typeof window.Tags.syncFromStorage === "function") window.Tags.syncFromStorage();
@@ -886,7 +1164,8 @@
           <button type="button" data-act="zoom">放大</button>
           <button type="button" data-act="dl">下載</button>
           <button type="button" data-act="seed">同種子</button>
-          <button type="button" data-act="prompt">同提示詞</button>
+          <button type="button" data-act="prompt"${hasPositiveSnapshot(it) ? "" : " disabled"} title="套用正向提示詞。來源：歷史圖片；寫入目前提示詞。替換正向標籤與補充描述，保留 Negative、LoRA 和生成設定。">正向套用</button>
+          <button type="button" data-act="restore"${hasPositiveSnapshot(it) ? "" : " disabled"} title="還原已保存的提示詞狀態。來源：歷史圖片；生成設定保留。">狀態還原</button>
           <button type="button" data-act="del" class="danger">刪除</button>
         </div>
         <figcaption class="shot-meta">${it.w}×${it.h} · 種子 ${it.seed}</figcaption>
@@ -1009,6 +1288,15 @@
     const many = S.lbList.length > 1;
     $("lbPrev").hidden = !many;
     $("lbNext").hidden = !many;
+    const positiveReady = hasPositiveSnapshot(it);
+    $("lbPrompt").disabled = !positiveReady;
+    $("lbPrompt").title = positiveReady ? "來源：這張歷史圖片；寫入目前提示詞的正向標籤與補充描述。Negative、LoRA 和生成設定保留。" : "這筆舊紀錄缺少完整提示詞資料，無法安全套用。";
+    $("lbRestore").disabled = !positiveReady;
+    $("lbRestore").title = positiveReady ? "來源：這張歷史圖片；確認後還原已保存的提示詞狀態。尺寸、步數、CFG、Seed 和模型保留。" : "這筆舊紀錄缺少完整提示詞資料，無法安全還原。";
+    $("lbApply").disabled = !Array.isArray(it.sel);
+    $("lbApply").title = Array.isArray(it.sel)
+      ? "基底：歷史圖片；替換來源：目前提示詞；寫入目標：目前提示詞。已選分類替換，未選分類保留歷史內容。"
+      : "這筆舊紀錄缺少標籤資料，無法安全分類替換。";
   }
 
   function lbStep(d) {
@@ -1039,24 +1327,183 @@
     toast(`已套用種子 ${it.seed}，按生成就能重現`, "ok");
   }
 
-  function reusePrompt(it) {
-    window.Tags.restore(it.sel || []);
-    $("pos").value = it.extra || "";
-    try { localStorage.setItem("ui.extra", $("pos").value); } catch (e) { /* ignore */ }
-    if (it.neg) { $("neg").value = it.neg; persistSettings(); }
-    // 新紀錄只要有 loras 欄位就要完整還原；空陣列表示該次生成沒有用 LoRA，
-    // 必須清空目前角色。舊紀錄完全沒有這個欄位時才保持目前選擇。
-    if (Array.isArray(it.loras)) {
-      S.loras = loraParseItems({ items: it.loras.map(l => ({
-        name: l.name, display: l.display, strength: l.strength,
-        triggers: l.triggers, autoTrigger: l.autoTrigger, enabled: true
-      })) });
-      loraSave();
-      renderLoraSelected();
-      renderLoraPick();
+  function buildReusePlan(it) {
+    const item = it && typeof it === "object" ? it : {};
+    const positiveReady = hasPositiveSnapshot(item);
+    const positive = buildPositiveReusePlan(item);
+    const hasLoras = Array.isArray(item.loras);
+    const loraList = hasLoras ? item.loras.map(l => {
+      const prev = loraItem(l && l.name);
+      return {
+        name: l && l.name, display: l && l.display, strength: l && l.strength,
+        triggers: l && (l.personalTriggers || l.triggers), autoTrigger: l && l.autoTrigger, enabled: true,
+        noTriggerNeeded: l && l.noTriggerNeeded,
+        authorSuggestions: prev ? prev.authorSuggestions : null
+      };
+    }) : null;
+    return {
+      source: item,
+      positiveReady,
+      positiveError: positiveReady ? "" : "這筆舊紀錄缺少完整提示詞資料，無法安全套用。",
+      positive,
+      sel: positive ? positive.sel : null,
+      extra: positive ? positive.extra : null,
+      // Full restore is explicit: an existing empty neg clears, while an absent legacy field is preserved.
+      negAction: Object.prototype.hasOwnProperty.call(item, "neg") && typeof item.neg === "string" ? "replace" : "keep",
+      neg: typeof item.neg === "string" ? item.neg : "",
+      loraAction: hasLoras ? "replace" : "keep",
+      loraList,
+      summary: hasLoras
+        ? (loraList.length ? `會替換目前 LoRA（${loraList.length} 個）。` : "會清空目前 LoRA（這筆歷史保存的角色清單為空）。")
+        : "這筆歷史沒有 LoRA 欄位，目前 LoRA 保留。"
+    };
+  }
+
+  function buildPositiveReusePlan(item) {
+    if (!hasPositiveSnapshot(item)) return null;
+    const sel = JSON.parse(JSON.stringify(item.sel));
+    const currentSel = window.Tags && typeof window.Tags.snapshot === "function"
+      ? JSON.parse(JSON.stringify(window.Tags.snapshot())) : [];
+    const key = e => String(e && e.t || "").toLowerCase().trim().replace(/[_\s]+/g, " ");
+    const targetKeys = new Set(sel.map(key)), currentKeys = new Set(currentSel.map(key));
+    const currentByKey = new Map();
+    currentSel.forEach(e => { if (!currentByKey.has(key(e))) currentByKey.set(key(e), e); });
+    const retained = [], weightChanges = [];
+    sel.forEach(e => {
+      const current = currentByKey.get(key(e));
+      if (!current) return;
+      const from = positiveTagWeight(current), to = positiveTagWeight(e);
+      if (from === to) retained.push(e);
+      else weightChanges.push({ t: e.t, from, to });
+    });
+    return {
+      sel, extra: item.extra, currentSel,
+      currentExtra: $("pos") ? String($("pos").value || "") : "",
+      added: sel.filter(e => !currentKeys.has(key(e))),
+      removed: currentSel.filter(e => !targetKeys.has(key(e))),
+      retained, weightChanges
+    };
+  }
+
+  // Match caWeight(): stored tag weights must be finite and positive; otherwise they mean 1.
+  function positiveTagWeight(entry) {
+    const weight = Number(entry && entry.w);
+    return Number.isFinite(weight) && weight > 0 ? weight : 1;
+  }
+
+  function positiveWeightLabel(weight) { return positiveTagWeight({ w: weight }).toFixed(1); }
+
+  function reuseDiffList(entries, empty) {
+    return entries.length ? `<ul>${entries.map(e => {
+      const weight = positiveTagWeight(e);
+      return `<li>${esc(e.t)}${Number.isFinite(weight) && Math.abs(weight - 1) > 1e-9 ? ` × ${weight.toFixed(1)}` : ""}</li>`;
+    }).join("")}</ul>` : `<p class="meta">${empty}</p>`;
+  }
+
+  function positiveLabels(entries) {
+    return entries.map(e => {
+      const weight = positiveTagWeight(e);
+      return `${e.t}${Math.abs(weight - 1) > 1e-9 ? ` (${weight.toFixed(1)})` : ""}`;
+    }).join(", ");
+  }
+
+  function positiveReusePreview(plan) {
+    if (!plan) return '<p role="alert">缺少完整的正向提示詞資料，目前內容不會變更。</p>';
+    return `<section class="prompt-diff" aria-label="正向提示詞差異預覽">
+      <div><h3>目前 Positive</h3><pre>${esc(positiveLabels(plan.currentSel) + (plan.currentExtra ? (plan.currentSel.length ? ", " : "") + plan.currentExtra : "") || "（空的）")}</pre></div>
+      <div><h3>套用後 Positive</h3><pre>${esc(positiveLabels(plan.sel) + (plan.extra ? (plan.sel.length ? ", " : "") + plan.extra : "") || "（空的）")}</pre></div>
+      <div class="prompt-diff-cols">
+        <section><h3>新增</h3>${reuseDiffList(plan.added, "沒有新增標籤")}</section>
+        <section><h3>移除</h3>${reuseDiffList(plan.removed, "沒有移除標籤")}</section>
+        <section><h3>保留</h3>${reuseDiffList(plan.retained, "沒有相同標籤")}</section>
+        <section><h3>權重變更</h3>${plan.weightChanges.length
+          ? `<ul>${plan.weightChanges.map(change => `<li>${esc(change.t)}：${positiveWeightLabel(change.from)} → ${positiveWeightLabel(change.to)}</li>`).join("")}</ul>`
+          : '<p class="meta">沒有權重變更</p>'}</section>
+      </div>
+      <div><h3>補充描述</h3><p><b>目前：</b>${esc(plan.currentExtra || "（空的）")}</p><p><b>套用後：</b>${esc(plan.extra || "（空的）")}</p></div>
+    </section>`;
+  }
+
+  function commitReuse(plan) {
+    if (!plan || !plan.positiveReady) {
+      toast("這筆舊紀錄缺少完整提示詞資料，無法安全套用", "warn");
+      return false;
+    }
+    let nextLoras = null;
+    if (plan.loraAction !== "keep") {
+      nextLoras = loraParseItems({ v: 2, items: plan.loraList });
+      const saved = window.LoraMigration.saveState(localStorage, { items: nextLoras }, loraSerialize);
+      S.loraMigrationResult = saved;
+      if (!saved.ok) { toast(saved.message, "err", 6500); return false; }
+    }
+    try { window.Tags.restore(plan.sel); }
+    catch (e) { toast("套用失敗，目前提示詞沒有變更", "err"); return false; }
+    $("pos").value = plan.extra;
+    try { localStorage.setItem("ui.extra", plan.extra); } catch (e) { /* ignore */ }
+    if (plan.negAction === "replace") { $("neg").value = plan.neg; persistSettings(); }
+    if (plan.loraAction !== "keep") {
+      S.loras = nextLoras;
+      S.loraCiv = {};
+      if (LORA.active && !loraItem(LORA.active)) { LORA.active = null; LORA.editing = -1; }
+      renderLoraSelected(); renderLoraPick(); renderLoraTriggers();
+      renderLoraBackupNotice();
     }
     updateWarn();
-    toast("已套用這張圖的提示詞", "ok");
+    toast("已還原這張圖保存的提示詞狀態；生成設定保留", "ok");
+    return true;
+  }
+
+  function reusePrompt(it) {
+    const plan = buildReusePlan(it);
+    const currentLoras = (S.loras || []).map(l => `${esc(l.display || l.name)} × ${Number(l.strength || 0).toFixed(2)}`).join("、");
+    const restoredLoras = plan.loraAction === "keep" ? currentLoras :
+      (plan.loraList || []).map(l => `${esc(l.display || l.name)} × ${Number(l.strength || 0).toFixed(2)}`).join("、");
+    openModal("還原已保存的提示詞狀態", `<p>來源：這張歷史圖片。寫入目標：目前提示詞。</p>
+      ${plan.positiveReady ? `<p>會還原歷史保存的正向標籤與補充描述。</p>` : `<p role="alert">${esc(plan.positiveError)}目前內容不會變更。</p>`}
+      ${positiveReusePreview(plan.positive)}
+      <p>${esc(plan.summary)}</p>
+      <section class="prompt-diff" aria-label="Negative 還原差異"><h3>Negative · ${plan.negAction === "keep" ? "保留目前內容" : plan.neg ? "取代" : "將清空"}</h3><p><b>目前：</b><pre>${esc($("neg") ? $("neg").value : "") || "（空的）"}</pre></p><p><b>還原後：</b><pre>${esc(plan.negAction === "keep" ? ($( "neg") ? $("neg").value : "") : plan.neg) || "（空的）"}</pre></p></section>
+      <section class="prompt-diff" aria-label="LoRA 還原差異"><h3>LoRA · ${plan.loraAction === "keep" ? "保留目前內容" : plan.loraList.length ? "取代" : "將清空"}</h3>
+        <p><b>目前：</b>${currentLoras || "（空的）"}</p>
+        <p><b>還原後：</b>${plan.loraAction === "keep" ? (restoredLoras || "保留目前空清單") : restoredLoras || "將清空"}</p></section>
+      <p>尺寸、步數、CFG、Seed、模型及其他生成設定都保留目前值。</p>
+      ${plan.loraList && plan.loraList.length ? `<ul>${plan.loraList.map((l, i) => `<li>${esc(l.display || l.name)} × ${Number(l.strength || 0).toFixed(2)}（第 ${i + 1} 個）</li>`).join("")}</ul>` : ""}
+      <div class="modal-foot"><button type="button" class="btn btn-ghost" data-close>取消</button>
+      <button type="button" class="btn btn-primary" data-reuse="confirm"${plan.positiveReady ? "" : " disabled"}>還原已保存的提示詞狀態</button></div>`);
+    const confirm = $("modalBody").querySelector('[data-reuse="confirm"]');
+    confirm.onclick = () => { if (commitReuse(plan)) closeModal(); };
+  }
+
+  function reuseTextPrompt(it) {
+    const item = it && typeof it === "object" ? it : {};
+    const plan = buildPositiveReusePlan(item);
+    if (!plan) {
+      toast("這筆舊紀錄缺少完整提示詞資料，無法安全套用", "warn");
+      return false;
+    }
+    openModal("套用正向提示詞", `<p>來源：這張歷史圖片。寫入目標：目前提示詞。</p>
+      <p>將這張歷史圖片的正向標籤與補充描述套用到目前提示詞；目前 Negative、LoRA 與生成設定不會改變。</p>
+      ${positiveReusePreview(plan)}
+      <div class="modal-foot"><button type="button" class="btn btn-ghost" data-close>取消</button>
+      <button type="button" class="btn btn-primary" data-positive-reuse="confirm">套用正向提示詞</button></div>`);
+    const confirm = $("modalBody").querySelector('[data-positive-reuse="confirm"]');
+    confirm.onclick = () => {
+      try { window.Tags.restore(plan.sel); }
+      catch (e) { toast("套用失敗，目前提示詞沒有變更", "err"); return; }
+      $("pos").value = plan.extra;
+      try { localStorage.setItem("ui.extra", plan.extra); } catch (e) { /* ignore */ }
+      updateWarn();
+      closeModal();
+      toast("已套用歷史圖片的正向提示詞；目前 Negative、LoRA 與生成設定保留", "ok");
+    };
+    return true;
+  }
+
+  function hasPositiveSnapshot(item) {
+    return !!item && typeof item === "object" &&
+      Object.prototype.hasOwnProperty.call(item, "sel") && Array.isArray(item.sel) &&
+      item.sel.every(entry => entry && typeof entry === "object" && typeof entry.t === "string") &&
+      Object.prototype.hasOwnProperty.call(item, "extra") && typeof item.extra === "string";
   }
 
   /* ==== CATEGORY_APPLY_PLANNER_START ====
@@ -1290,6 +1737,9 @@
   function caCurrentPlan() {
     return caPlanApply(CA.it && CA.it.sel, window.Tags.snapshot(), CA.checked, CA.candidates);
   }
+  function caExtraPreviewValue(current) {
+    return CA.extraMode === "keep" ? current : CA.extraText;
+  }
   function caRebuild() {
     CA.candidates = caBuildCandidates(CA.it && CA.it.sel, window.Tags.snapshot(), CA.cats, { role: CA.role });
     // 手動勾選只是覆寫；分類或模式改變時，其餘項目一律用新的預設值。
@@ -1300,7 +1750,11 @@
   function caOpen(it) {
     const TC = window.TagCategories;
     if (!TC || typeof TC.has !== "function" || typeof TC.of !== "function" || !TC.categories) {
-      toast("分類資料沒有載入，請重新整理頁面再試；仍然可以用「用同提示詞」完整套用。", "warn", 6000);
+      toast("分類資料沒有載入，請重新整理頁面再試；也可以用「還原已保存的提示詞狀態」。", "warn", 6000);
+      return;
+    }
+    if (!it || !Object.prototype.hasOwnProperty.call(it, "sel") || !Array.isArray(it.sel)) {
+      toast("這筆舊紀錄缺少完整標籤資料，無法安全分類替換", "warn");
       return;
     }
     CA.it = it;
@@ -1351,12 +1805,14 @@
     const curPos = ($("pos") && $("pos").value) || "";
     const histExtra = CA.it.extra || "";
     const extraRadios = [
-      ["keep", "保留目前的補充描述（推薦）"],
-      ["replace", "改用這張歷史圖片的補充描述"],
-      ["merge", "合併目前與歷史圖片的補充描述（自動去重）"]
+      ["keep", "補充描述：保留目前內容（不讀歷史文字）"],
+      ["replace", "補充描述：以歷史圖片文字取代目前內容"],
+      ["merge", "補充描述：目前內容＋歷史圖片文字（去重合併）"]
     ]
       .map(o => '<label><input type="radio" name="caExtra" data-ca="extra" data-mode="' + o[0] + '"' +
-        (CA.extraMode === o[0] ? " checked" : "") + "> " + esc(o[1]) + "</label>").join(" ");
+        (CA.extraMode === o[0] ? " checked" : "") +
+        (o[0] !== "keep" && !(Object.prototype.hasOwnProperty.call(CA.it, "extra") && typeof CA.it.extra === "string") ? " disabled" : "") +
+        "> " + esc(o[1]) + "</label>").join(" ");
     const extraText = CA.extraMode === "keep" ? "" :
       '<textarea id="caExtraText" class="prompt-box" rows="4" aria-label="補充描述結果">' + esc(CA.extraText) + "</textarea>";
     // 可套用與否必須同時考慮標籤與補充描述；caCommit() 早已允許只改補充描述。
@@ -1368,7 +1824,7 @@
       ? "套用（移除 " + plan.stats.removeCount + " · 加入 " + plan.stats.addCount + "）"
       : (hasExtraChange ? "套用補充描述" : "套用（移除 0 · 加入 0）");
     body.innerHTML =
-      '<p class="meta">以這張歷史圖片為基底。選取分類後，歷史圖片中相同分類的標籤會由目前提示詞的內容取代；沒有選取的分類會保留歷史圖片原本的內容。</p>' +
+      '<p class="meta">以這張歷史圖片為基底。替換來源：目前提示詞；寫入目標：目前提示詞。已選分類會用目前同分類內容取代歷史內容；未選分類保留歷史內容。</p>' +
       "<h3>快速替換（先預覽，確認後才會套用）</h3>" +
       '<div class="rev-modes">' + quickHtml + "</div>" +
       "<h3>選擇要替換的分類（可多選）</h3>" +
@@ -1383,7 +1839,13 @@
         '<div id="caAddList" class="rev-tags">' + (addCandidates.length ? addCandidates.map(chip).join("") : '<span class="rev-empty">尚無</span>') + "</div>" +
         '<p class="meta">這些標籤會從目前提示詞帶入，取代歷史圖片中選取分類的內容。⚠ 表示需要你確認；角色專屬服裝與表情不會自動帶入。</p></div>' +
       "</div>" +
-      "<h3>補充描述</h3>" +
+      '<section class="prompt-diff ca-final" aria-label="分類套用後 Positive"><h3>套用後 Positive（標籤與補充描述）</h3>' +
+        '<p class="meta">歷史內容是基底；勾選分類採用目前內容，其他歷史標籤保留。</p>' +
+        '<pre id="caFinalTags">' + esc(plan.nextSel.map(e => e.t + (Number(e.w) !== 1 ? " (" + Number(e.w).toFixed(1) + ")" : "")).join(", ") || "（沒有標籤）") + '</pre>' +
+        '<p><b>補充描述結果：</b></p><pre id="caFinalExtra">' + esc(caExtraPreviewValue(curPos) || "（空的）") + '</pre>' +
+      '</section>' +
+      "<h3>補充描述（與上方標籤分類替換分開）</h3>" +
+      (!(Object.prototype.hasOwnProperty.call(CA.it, "extra") && typeof CA.it.extra === "string") ? '<p class="meta">歷史紀錄缺少補充描述；保留目前內容，無法安全替換或合併歷史文字。</p>' : "") +
       '<div class="rev-rating">' + extraRadios + "</div>" +
       '<p class="meta">目前提示詞：' + esc(curPos || "（空的）") + "</p>" +
       '<p class="meta">歷史圖片：' + esc(histExtra || "（空的）") + "</p>" +
@@ -1391,7 +1853,7 @@
       hint +
       '<div class="modal-foot">' +
         '<button type="button" class="btn btn-ghost" data-close>取消</button>' +
-        '<button type="button" class="btn btn-soft" data-ca="full">完整套用</button>' +
+        '<button type="button" class="btn btn-soft" data-ca="full">還原已保存的提示詞狀態…</button>' +
         '<button type="button" class="btn btn-primary" id="caApply" data-ca="apply"' +
         (canApply ? "" : " disabled") + ">" + esc(footLabel) + "</button>" +
       "</div>";
@@ -1430,13 +1892,21 @@
   function caOnChange(e) {
     const b = e.target;
     if (!b || b.dataset.ca !== "extra") return;
+    if (b.dataset.mode !== "keep" && !(CA.it && Object.prototype.hasOwnProperty.call(CA.it, "extra") && typeof CA.it.extra === "string")) {
+      toast("歷史紀錄缺少補充描述，無法安全替換或合併", "warn");
+      return;
+    }
     CA.extraMode = b.dataset.mode;
     // 文字框預填「確定後會寫入的內容」，使用者改了就以改過的為準。
     CA.extraText = caExtraResult(CA.extraMode, ($("pos") && $("pos").value) || "", CA.it.extra || "");
     caRender();
   }
   function caOnInput(e) {
-    if (e.target && e.target.id === "caExtraText") CA.extraText = e.target.value;
+    if (e.target && e.target.id === "caExtraText") {
+      CA.extraText = e.target.value;
+      const finalExtra = $("modalBody").querySelector("#caFinalExtra");
+      if (finalExtra) finalExtra.textContent = CA.extraText || "（空的）";
+    }
   }
   function caCommit() {
     if (!CA.it) return;
@@ -1454,7 +1924,7 @@
     closeLightbox();
     const note = CA.extraMode === "keep" ? "" :
       "，補充描述已" + (CA.extraMode === "replace" ? "取代" : "合併");
-    toast("已套用分類（移除 " + plan.stats.removeCount + "、加入 " + plan.stats.addCount + "）" + note, "ok");
+    toast("已寫回目前提示詞：分類替換（移除 " + plan.stats.removeCount + "、加入 " + plan.stats.addCount + "）" + note, "ok");
   }
 
   /* ── 刪圖 ─────────────────────────────────────────────── */
@@ -1541,7 +2011,16 @@
     openDialog($("modal"), closeModal, $("modalBody").querySelector("button"));
   }
 
-  function closeModal() { closeDialog($("modal")); }
+  function closeModal() {
+    if (PV) {
+      const main = $("pvMain");
+      if (main) { main.onerror = null; main.removeAttribute("src"); }
+      const strip = $("pvStrip");
+      if (strip) strip.onclick = null;
+      PV = null;
+    }
+    closeDialog($("modal"));
+  }
 
   // 輸出資料夾：由後端驗證並保存，前端只負責輸入完整路徑
   function openOutputDirModal() {
@@ -1592,8 +2071,9 @@
   }
 
   function showPromptModal() {
-    const p = composePrompt();
-    const neg = $("neg").value.trim();
+    const composed = composeCurrentPrompt();
+    const p = composed.result.pos;
+    const neg = composed.result.neg;
     const loras = loraSnapshot(S.loras);
     openModal("完整提示詞", `
       <p class="meta" style="margin-bottom:8px">這就是真正送進模型的內容（正面 ${p.split(",").filter(x => x.trim()).length} 個標籤）。</p>
@@ -1618,6 +2098,13 @@
   /* ── 角色 LoRA：選取、權重、觸發詞 ─────────────────────── */
   const LORA = { filter: "", active: null, editing: -1 };
   let loraListReq = null;
+  // 版本網址輸入框的暫存（重新繪製面板時不遺失），不進 localStorage
+  const cvInputs = {};
+  // Civitai 建議詞讀取：每個 LoRA 的請求世代序號 + 進行中請求。
+  // seq 遞增辨識每次獨立操作（取消連結也會遞增），只有序號仍最新的回應才可更新狀態；
+  // pending 用於防重複，避免同一 LoRA 同一版本的相同請求重複發送。皆不進 localStorage。
+  const civReqSeq = {};
+  const civReqPending = {};
 
   function loraItem(name) {
     const i = loraFind(S.loras, name);
@@ -1630,7 +2117,68 @@
   }
 
   function loraSave() {
-    saveJSON("ui.loras", loraSerialize(S.loras));
+    if (S.loraMigrationBlocked) {
+      toast(S.loraMigrationResult && S.loraMigrationResult.message || "LoRA 資料尚未安全遷移，暫時無法保存。", "err", 6500);
+      return false;
+    }
+    const saved = window.LoraMigration.saveState(localStorage, { items: S.loras }, loraSerialize);
+    S.loraMigrationResult = saved;
+    if (!saved.ok) toast(saved.message, "err", 6500);
+    renderLoraBackupNotice();
+    return saved.ok;
+  }
+
+  function renderLoraBackupNotice() {
+    const box = $("loraBackupNotice");
+    if (!box) return;
+    const parsed = window.LoraMigration.parseBackup(localStorage);
+    if (parsed.error) {
+      box.hidden = false;
+      box.innerHTML = `<div class="lora-backup-head">遷移備份狀態無法讀取</div><p>${esc(parsed.error.message)}</p>`;
+      return;
+    }
+    const records = parsed.value.backups.filter(window.LoraMigration.validateRecord);
+    if (!records.length) { box.hidden = true; box.replaceChildren(); return; }
+    const canConfirm = !S.loraMigrationBlocked && S.loraMigrationResult && S.loraMigrationResult.ok;
+    box.hidden = false;
+    box.innerHTML = `<div class="lora-backup-head">LoRA 遷移備份：${records.filter(x => x.status === "pending").length} 筆待確認</div>` +
+      (S.loraMigrationBlocked && S.loraMigrationResult ? `<p>${esc(S.loraMigrationResult.message)} 目前不會覆寫原始資料；重新整理可重試遷移。</p>` : "") +
+      records.map(x => {
+        const words = x.payload.kind === "item" && x.payload.value.triggers;
+        const canRestore = canConfirm && x.status === "pending" && x.itemName && loraFind(S.loras, x.itemName) >= 0 &&
+          Array.isArray(words) && words.every(w => typeof w === "string");
+        return `<div class="lora-backup-row"><span><b>${x.status === "pending" ? "待確認" : x.status === "confirmed" ? "已確認" : "已捨棄"}</b> · ${esc(x.itemName || "整份資料")} · ${esc(x.reason)}</span>` +
+          (x.status === "pending" && canConfirm ? `<span class="lora-backup-actions">${canRestore ? `<button type="button" class="btn btn-ghost btn-sm" data-backup-restore="${esc(x.backupId)}">還原舊詞</button>` : ""}<button type="button" class="btn btn-soft btn-sm" data-backup-confirm="${esc(x.backupId)}">保留目前結果</button></span>` : "") +
+          `</div>`;
+      }).join("");
+  }
+
+  function confirmLoraBackup(backupId, restoreOldWords) {
+    if (S.loraMigrationBlocked || !S.loraMigrationResult || !S.loraMigrationResult.ok) {
+      toast("遷移結果尚未成功保存，現在不能確認。", "err", 6500);
+      return;
+    }
+    if (restoreOldWords) {
+      const current = window.LoraMigration.parseBackup(localStorage);
+      const record = current.error ? null : current.value.backups.find(x => x.backupId === backupId && x.status === "pending");
+      const words = record && record.payload && record.payload.kind === "item" && record.payload.value && record.payload.value.triggers;
+      const index = record && record.itemName ? loraFind(S.loras, record.itemName) : -1;
+      if (!Array.isArray(words) || !words.every(w => typeof w === "string") || index < 0) {
+        toast("這筆備份沒有可還原的舊詞，原設定與備份都保留。", "err", 6500);
+        return;
+      }
+      const next = S.loras.slice();
+      next[index] = Object.assign({}, next[index], { triggers: loraCleanTriggerList(next[index].triggers.concat(words)) });
+      const savedState = window.LoraMigration.saveState(localStorage, { items: next }, loraSerialize);
+      if (!savedState.ok || !savedState.verified) { toast(savedState.message, "err", 6500); return; }
+      S.loras = next;
+      S.loraMigrationResult = savedState;
+      renderLoraSelected(); renderLoraPick(); renderLoraTriggers();
+    }
+    const saved = window.LoraMigration.confirmBackup(localStorage, backupId);
+    S.loraMigrationResult = saved.ok ? S.loraMigrationResult : saved;
+    renderLoraBackupNotice();
+    toast(saved.ok ? "已確認目前的 LoRA 遷移結果；備份仍保留。" : saved.message, saved.ok ? "ok" : "err", 6500);
   }
 
   // 清單還沒載入時不亂標「找不到」，避免 ComfyUI 暫時離線就嚇使用者
@@ -1673,9 +2221,16 @@
     }
     box.innerHTML = items.map(it => {
       const miss = !loraAvailable(it.name);
+      const sug = loraSuggestionCount(it);
       const note = miss
         ? `<span class="lora-note bad">本機已找不到這個模型，生成前請移除</span>`
-        : `<span class="lora-note">${it.autoTrigger ? "觸發詞" : "觸發詞（不自動加入）"} ${it.triggers.length}</span>`;
+        : it.noTriggerNeeded
+          ? `<span class="lora-note">已確認不需要觸發詞</span>`
+          : !it.triggers.length && sug
+            ? `<span class="lora-note">有待加入的作者建議 ${sug}</span>`
+            : !it.triggers.length
+              ? `<span class="lora-note">尚未確認觸發詞</span>`
+              : `<span class="lora-note">${it.autoTrigger ? "觸發詞" : "觸發詞（不自動加入）"} ${it.triggers.length}</span>`;
       return `<div class="lora-row${miss ? " missing" : ""}" data-name="${esc(it.name)}">
         <div class="lora-row-top">
           <span class="lora-name" title="${esc(it.name)}">${esc(it.display)}</span>
@@ -1944,6 +2499,7 @@
 
   function cvOpenModal() {
     cvLoadStatus(true);
+    cvKeyRefresh();          // 每次開啟都重新向後端取得 Key 狀態
     openDialog($("exploreModal"), cvCloseModal, $("cvSearch"));
     renderExplore();
   }
@@ -1953,18 +2509,168 @@
     cvAbort("search");
     try { if (CV.debounce) clearTimeout(CV.debounce); } catch (e) { /* ignore */ }
     CV.debounce = null;
+    CV.key.formOpen = false;
+    const ki = $("cvKeyInput");
+    if (ki) ki.value = "";
+    renderKeyUI();
     closeDialog($("exploreModal"));
+  }
+
+  /* ── Civitai Personal API Key（只在本機後端保存）──────────── */
+  function renderKeyUI() {
+    const k = CV.key;
+    const status = $("cvKeyStatus"), form = $("cvKeyForm"), input = $("cvKeyInput");
+    if (!status || !form) return;
+    if (k.state === "loading") status.textContent = "正在讀取 Civitai API Key 狀態…";
+    else if (k.configured) {
+      status.textContent = "已設定 Civitai API Key" +
+        (k.username ? "：" + esc(k.username) + (k.tier ? "（" + esc(k.tier) + "）" : "（尚未測試連線）") : "") +
+        (k.error ? " · " + esc(k.error) : "");
+    } else status.textContent = "未設定 Civitai API Key（仍可匿名搜尋公開 LoRA）";
+    $("cvKeyEdit").hidden = k.formOpen;
+    $("cvKeyTest").hidden = !k.configured || k.formOpen;
+    $("cvKeyRemove").hidden = !k.configured || k.formOpen;
+    form.hidden = !k.formOpen;
+    if (input && !k.formOpen) input.value = "";
+    const result = $("cvKeyResult");
+    if (result) {
+      result.hidden = !k.result;
+      result.textContent = k.result || "";
+      result.className = "cv-key-result" + (k.resultKind ? " " + k.resultKind : "");
+    }
+    ["cvKeyEdit", "cvKeyTest", "cvKeyRemove", "cvKeySave", "cvKeyCancel"].forEach(id => {
+      const b = $(id); if (b) b.disabled = k.busy;
+    });
+  }
+
+  function cvKeyPost(path, body) {
+    return fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-SimpleUI": "1" },
+      body: body ? JSON.stringify(body) : "{}"
+    });
+  }
+
+  function cvKeyMsg(r, j) {
+    if (j && j.error) return j.error;
+    return "操作失敗（HTTP " + r.status + "），請稍後再試一次。";
+  }
+
+  function cvKeyRefresh() {
+    const k = CV.key;
+    k.state = "loading"; renderKeyUI();
+    return fetch("/api/civitai/key/status", { cache: "no-store" })
+      .then(async r => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(cvKeyMsg(r, j));
+        return j;
+      })
+      .then(j => {
+        k.configured = !!j.configured;
+        k.username = ""; k.tier = ""; k.error = j.error || "";
+        k.state = "ready"; renderKeyUI();
+      })
+      .catch(e => {
+        k.state = "error"; k.error = "讀取金鑰狀態失敗，請重新整理。"; renderKeyUI();
+      });
+  }
+
+  function cvKeySave() {
+    const k = CV.key, input = $("cvKeyInput");
+    const value = (input && input.value || "").trim();
+    if (!value) {
+      k.result = "請先貼上你的 Civitai API Key。"; k.resultKind = "err"; renderKeyUI(); return;
+    }
+    k.busy = true; renderKeyUI();
+    return cvKeyPost("/api/civitai/key", { key: value })
+      .then(async r => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(cvKeyMsg(r, j));
+        k.configured = true; k.formOpen = false;
+        k.result = "金鑰已儲存，建議按「測試連線」確認。"; k.resultKind = "ok";
+      })
+      .catch(e => { k.result = e.message || "儲存失敗，請再試一次。"; k.resultKind = "err"; })
+      .finally(() => {
+        k.busy = false;
+        if (input) input.value = "";
+        renderKeyUI();
+      });
+  }
+
+  function cvKeyTest() {
+    const k = CV.key;
+    k.busy = true; renderKeyUI();
+    return cvKeyPost("/api/civitai/key/test")
+      .then(async r => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(cvKeyMsg(r, j));
+        k.username = j.username || ""; k.tier = j.tier || "";
+        k.result = "連線成功：" + (k.username || "Civitai 帳號") +
+          (k.tier ? "（" + k.tier + "）" : "");
+        k.resultKind = "ok";
+      })
+      .catch(e => { k.result = e.message || "測試失敗，請稍後再試。"; k.resultKind = "err"; })
+      .finally(() => { k.busy = false; renderKeyUI(); });
+  }
+
+  function cvKeyRemove() {
+    const k = CV.key;
+    k.busy = true; renderKeyUI();
+    return cvKeyPost("/api/civitai/key/remove")
+      .then(async r => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(cvKeyMsg(r, j));
+        k.configured = false; k.username = ""; k.tier = "";
+        k.result = "已移除本機金鑰。若要撤銷 Civitai 端授權，請到帳號設定刪除該金鑰。";
+        k.resultKind = "ok";
+      })
+      .catch(e => { k.result = e.message || "移除失敗，請稍後再試。"; k.resultKind = "err"; })
+      .finally(() => { k.busy = false; renderKeyUI(); });
   }
 
   function cvBadge(cls) {
     return `<span class="cv-badge ${esc(cls.key)}">${esc(cls.label)}</span>`;
   }
 
+  function cvCkptBase() {
+    return CV.ckpt && CV.ckpt.baseModel ? CV.ckpt.baseModel : null;
+  }
+
+  // 圖片 URL 只信任 Civitai 官方圖片 CDN；任何異常直接不顯示，不組裝錯誤 URL。
+  function cvImageUrl(raw) {
+    if (typeof raw !== "string" || !raw) return "";
+    try {
+      const u = new URL(raw);
+      if (u.protocol !== "https:" || u.hostname.toLowerCase() !== "image.civitai.com") return "";
+      if ((u.port && u.port !== "443") || u.username || u.password) return "";
+      if (!u.pathname.startsWith("/") || u.pathname.split("/").indexOf("..") >= 0) return "";
+      return u.href;
+    } catch (e) { return ""; }
+  }
+
+  // URL 驗證與成熟內容判斷分離：所有入口都走同一套 cvImageSafety()。
+  function cvImageVisible(img, model, showMature) {
+    if (!img || !cvImageUrl(img.url)) return false;
+    return cvImageSafety(img, model, showMature);
+  }
+
+  function cvPickImage(version, model, showMature) {
+    const list = (version && version.images) || [];
+    for (const img of list) if (cvImageVisible(img, model, showMature)) return img;
+    return null;
+  }
+
+  function cvPreviewKey(item, version) {
+    return String(item.modelId) + "|" + String(version && version.id);
+  }
+
   function cvRenderCard(item, ckptBase) {
-    const best = cvBestVersion(item.versions, ckptBase);
+    const bestInfo = cvBestVersionInfo(item.versions, ckptBase);
+    const best = bestInfo.cls;
     const cls = best ? best.key : "unknown";
-    const label = CV_LEVELS.find(x => x.key === cls) || CV_LEVELS[2];
     const stats = item.stats || {};
+    // 圖片只取自「決定卡片等級的那個版本」，不跨版本混用。
+    const cover = cvPickImage(bestInfo.version, item, CV.nsfw);
     const versions = (item.versions || []).map(v => {
       const c = cvClassify(v.baseModel, v.baseModelType, ckptBase);
       const lv = CV_LEVELS.find(x => x.key === c.key) || CV_LEVELS[2];
@@ -1982,18 +2688,28 @@
         <a class="cv-link" href="${esc(cvVersionUrl(item.modelId, v.id))}" target="_blank" rel="noopener noreferrer">在 Civitai 開啟這個版本 ↗</a>
       </div>`;
     }).join("");
+    const thumb = cover
+      ? `<button type="button" class="cv-thumb" data-cv-preview="${esc(cvPreviewKey(item, bestInfo.version))}" aria-label="預覽 ${esc(item.name || "模型")} 圖片" title="看預覽圖">
+           <span class="cv-thumb-ph">無預覽</span>
+           <img src="${esc(cover.thumb || cover.url)}" alt="" width="64" height="80" loading="lazy" decoding="async" data-cv-fallback="${esc(cover.url)}">
+         </button>`
+      : `<div class="cv-thumb cv-thumb-none"><span class="cv-thumb-ph">無預覽</span></div>`;
     return `<div class="cv-card" data-level="${cls}">
-      <div class="cv-card-head">
-        <div class="cv-card-title"><b>${esc(item.name || "未命名模型")}</b>
-          ${item.nsfw ? `<span class="cv-nsfw">成熟內容</span>` : ""}</div>
-        <div class="cv-meta">${esc(item.creator || "未知作者")} · 下載 ${esc(stats.downloadCount || 0)} · 喜歡 ${esc(stats.thumbsUpCount || 0)}</div>
-        ${best && best.reason ? `<div class="cv-meta">${esc(best.reason)}</div>` : ""}
+      <div class="cv-card-main">
+        ${thumb}
+        <div class="cv-card-head">
+          <div class="cv-card-title"><b>${esc(item.name || "未命名模型")}</b>
+            ${item.nsfw ? `<span class="cv-nsfw">成熟內容</span>` : ""}</div>
+          <div class="cv-meta">${esc(item.creator || "未知作者")} · 下載 ${esc(stats.downloadCount || 0)} · 喜歡 ${esc(stats.thumbsUpCount || 0)}</div>
+          ${best && best.reason ? `<div class="cv-meta">${esc(best.reason)}</div>` : ""}
+        </div>
       </div>
       <div class="cv-vers">${versions}</div>
     </div>`;
   }
 
   function renderExplore() {
+    renderKeyUI();
     const head = $("cvCkptInfo");
     if (head) {
       const c = CV.ckpt;
@@ -2044,6 +2760,116 @@
         ${list.map(it => cvRenderCard(it, ckptBase)).join("")}
       </section>`;
     }).join("") + (CV.error ? `<div class="lora-error" style="margin-top:10px">${esc(CV.error)}</div>` : "");
+    // 卡片縮圖失敗先退回原圖；原圖也失敗就隱藏，由固定佔位圖接管（不撐動版面）。
+    box.querySelectorAll("img[data-cv-fallback]").forEach(img => {
+      img.addEventListener("error", function () {
+        if (this.dataset.fallbackDone) { this.hidden = true; return; }
+        this.dataset.fallbackDone = "1";
+        this.src = this.dataset.cvFallback;
+      });
+    });
+  }
+
+  /* ── 模型詳細預覽：沿用通用 Modal / dialogStack，不碰本機圖片燈箱 ── */
+  function cvPreviewHtml() {
+    return `<div class="cv-pv">
+      <div class="cv-pv-stage"><img id="pvMain" class="cv-pv-main" alt="模型預覽圖"></div>
+      <div class="cv-pv-info">
+        <h3 id="pvName"></h3>
+        <p class="cv-meta" id="pvCreator"></p>
+        <p class="cv-meta" id="pvVersion"></p>
+        <p class="cv-meta" id="pvBase"></p>
+        <p id="pvBadge"></p>
+        <p class="cv-meta" id="pvReason"></p>
+        <p class="cv-words" id="pvWords"></p>
+        <p class="cv-meta" id="pvCount"></p>
+        <div id="pvStrip" class="cv-pv-strip"></div>
+        <div class="modal-foot">
+          <a id="pvLink" class="btn btn-soft btn-sm" href="#" target="_blank" rel="noopener noreferrer">在 Civitai 開啟這個版本 ↗</a>
+          <button type="button" class="btn btn-ghost" data-close>關閉</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function cvPreviewImageError(e) {
+    const el = e.target;
+    if (!el || !el.dataset) return;
+    if (el.dataset.fallbackDone) {
+      el.onerror = null; el.removeAttribute("src");
+      const stage = el.closest(".cv-pv-stage");
+      if (stage) stage.classList.add("failed");
+      return;
+    }
+    el.dataset.fallbackDone = "1";
+    el.src = el.dataset.original || "";
+  }
+
+  function cvPaintPreview() {
+    if (!PV) return;
+    const im = PV.images[PV.index];
+    if (!im) return;
+    const main = $("pvMain");
+    if (main) {
+      main.onerror = cvPreviewImageError;
+      main.dataset.original = im.url;
+      main.dataset.fallbackDone = "";
+      main.src = im.thumb || im.url;
+      main.alt = "預覽圖 " + (PV.index + 1);
+      const stage = main.closest(".cv-pv-stage");
+      if (stage) stage.classList.remove("failed");
+    }
+    const strip = $("pvStrip");
+    if (strip) strip.innerHTML = PV.images.map((x, i) =>
+      `<button type="button" class="cv-pv-thumb${i === PV.index ? " on" : ""}" data-pv-index="${i}" aria-label="第 ${i + 1} 張" aria-pressed="${i === PV.index}"><img src="${esc(x.thumb || x.url)}" alt="" width="48" height="60" loading="lazy" decoding="async" data-cv-fallback="${esc(x.url)}"></button>`).join("");
+    const v = PV.version || {};
+    const c = PV.cls || {};
+    const words = (v.trainedWords || []).slice(0, 8).join(", ");
+    if ($("pvName")) $("pvName").textContent = PV.item.name || "未命名模型";
+    if ($("pvCreator")) $("pvCreator").textContent = "作者：" + (PV.item.creator || "未知作者");
+    if ($("pvVersion")) $("pvVersion").textContent = "版本：" + (v.name || "未命名版本");
+    if ($("pvBase")) $("pvBase").textContent = "基底：" + (v.baseModel || "未知") + (v.baseModelType ? " · " + v.baseModelType : "");
+    if ($("pvBadge")) $("pvBadge").innerHTML = cvBadge(c);
+    if ($("pvReason")) $("pvReason").textContent = c.reason || "";
+    if ($("pvWords")) $("pvWords").textContent = words ? "觸發詞：" + words : "";
+    if ($("pvCount")) $("pvCount").textContent = "圖片 " + (PV.index + 1) + " / " + PV.images.length;
+    const link = $("pvLink");
+    if (link) link.href = cvVersionUrl(PV.item.modelId, v.id);
+  }
+
+  function cvOpenPreview(key) {
+    const parts = String(key || "").split("|");
+    const item = (CV.items || []).find(x => String(x.modelId) === parts[0]);
+    if (!item) return;
+    const version = (item.versions || []).find(v => String(v.id) === parts[1]);
+    if (!version) return;
+    const images = (version.images || []).filter(im => cvImageVisible(im, item, CV.nsfw)).map(im => {
+      const url = cvImageUrl(im.url);
+      return { url: url, thumb: cvImageUrl(im.thumb) || url };
+    });
+    if (!images.length) return;
+    PV = { item: item, version: version, cls: cvClassify(version.baseModel, version.baseModelType, cvCkptBase()),
+           images: images, index: 0 };
+    openModal("模型預覽", cvPreviewHtml());
+    const strip = $("pvStrip");
+    if (strip) {
+      strip.onclick = e => {
+        const b = e.target && e.target.closest("[data-pv-index]");
+        if (!b || !PV) return;
+        const i = Number(b.dataset.pvIndex);
+        if (!Number.isInteger(i) || i < 0 || i >= PV.images.length) return;
+        PV.index = i;
+        cvPaintPreview();
+      };
+      // 縮圖失敗時退回原圖（同一容器只綁一次，因為 openModal 每次重建 DOM）。
+      strip.addEventListener("error", e => {
+        const img = e.target;
+        if (!img || img.tagName !== "IMG" || img.dataset.fallbackDone) return;
+        img.dataset.fallbackDone = "1";
+        img.src = img.dataset.cvFallback || "";
+      }, true);
+    }
+    cvPaintPreview();
   }
 
   function renderLoraPick() {
@@ -2092,6 +2918,37 @@
     }).join("");
   }
 
+  function loraAuthor(name) {
+    const it = loraItem(name);
+    return loraParseAuthor(it && it.authorSuggestions);
+  }
+
+  function loraSetLocalGroups(name, groups) {
+    const it = loraItem(name);
+    if (!it) return;
+    const next = loraNormGroups([Array.isArray(groups) ? groups : []]);
+    if (JSON.stringify(it.authorSuggestions.local.groups) === JSON.stringify(next)) return;
+    S.loras = loraSet(S.loras, name, { authorSuggestions: {
+      local: { groups: next }, civitai: it.authorSuggestions.civitai
+    }});
+    loraSave();
+  }
+
+  function loraRenderAuthorGroups(groups, src) {
+    if (!groups.length) return `<p class="lora-empty">這個來源沒有提供建議詞。</p>`;
+    return groups.map((words, gi) => {
+      const shown = words.slice(0, 20);
+      return `<div class="lora-group">
+        <div class="lora-group-head"><b>建議 ${gi + 1}（${words.length}）</b>
+          <button type="button" class="btn btn-ghost btn-sm" data-lora-act="add-group" data-src="${src}" data-g="${gi}">整組加入</button>
+        </div>
+        <div class="lora-group-words">${shown.map((w, wi) =>
+          `<button type="button" class="lora-word" data-lora-act="add-word" data-src="${src}" data-g="${gi}" data-w="${wi}" title="加入這個詞">${esc(w)} +</button>`
+        ).join("")}${words.length > shown.length ? `<span class="lora-status">…還有 ${words.length - shown.length} 個</span>` : ""}</div>
+      </div>`;
+    }).join("");
+  }
+
   function renderLoraTriggers(keepInput) {
     const box = $("loraTrigPanel");
     if (!box) return;
@@ -2101,53 +2958,104 @@
       box.innerHTML = `<p class="lora-empty">選一個 LoRA（按右邊的「觸發詞」）就能管理它的觸發詞。</p>`;
       return;
     }
+    const author = loraAuthor(it.name);
     const m = S.loraMeta[it.name];
-    let metaHtml = `<p class="lora-meta">讀取模型資訊…</p>`;
-    if (m && m.state === "loading") metaHtml = `<p class="lora-meta">讀取模型資訊…</p>`;
-    else if (m && m.state === "error") metaHtml = `<p class="lora-meta">${esc(m.error || "讀不到模型資訊")}</p>`;
-    else if (m && m.state === "none") metaHtml = `<p class="lora-meta">這個模型沒有可讀取的 metadata，觸發詞請手動新增。</p>`;
-    else if (m && m.meta) {
-      const bits = [];
-      if (m.meta.architecture) bits.push(m.meta.architecture);
-      if (m.meta.networkDim) bits.push("dim " + m.meta.networkDim);
-      if (m.meta.resolution) bits.push(m.meta.resolution);
-      const sug = Array.isArray(m.meta.triggerWords) ? m.meta.triggerWords : [];
-      metaHtml = `<p class="lora-meta">${esc(bits.join(" · ") || "模型資訊")}</p>` +
-        (sug.length
-          ? `<div class="lora-sug">metadata 建議：${esc(sug.join(", "))}
-             <button type="button" class="btn btn-ghost btn-sm" data-lora-act="use-meta">帶入</button></div>`
-          : "");
-    }
+
+    // 個人 Trigger Words：唯一會注入 Prompt 的來源
     const chips = it.triggers.length
       ? it.triggers.map((t, i) => `<span class="lora-trig-chip">
           <button type="button" data-lora-act="edit-trig" data-i="${i}" title="編輯">${esc(t)}</button>
           <button type="button" data-lora-act="del-trig" data-i="${i}" title="移除" aria-label="移除 ${esc(t)}">×</button>
         </span>`).join("")
-      : `<p class="lora-empty">還沒有觸發詞。可手動新增，或從上面的 metadata 帶入。</p>`;
+      : `<p class="lora-empty">還沒有我的觸發詞。可以自己新增，或從下方建議詞加入。</p>`;
+    const personal = `
+      <section class="lora-section lora-personal">
+        <h3 class="lora-section-title">我的觸發詞（只有這裡的詞會自動加入提示詞）</h3>
+        <label class="switch-row">
+          <input type="checkbox" id="loraAuto" ${it.autoTrigger ? "checked" : ""}>
+          <span class="switch-ui" aria-hidden="true"></span>
+          <span class="switch-text">自動加入提示詞<small>${it.autoTrigger ? "目前會加在描述最後面" : "目前不會自動加入提示詞"}</small></span>
+        </label>
+        <div class="lora-trig-input">
+          <input id="loraTrigInput" type="text" placeholder="輸入觸發詞，逗號分隔可一次加多個" autocomplete="off">
+          <button type="button" class="btn btn-ghost btn-sm" id="loraTrigSave">${LORA.editing >= 0 ? "更新" : "新增"}</button>
+        </div>
+        <div class="lora-trig-chips">${chips}</div>
+        <button type="button" class="btn btn-ghost btn-sm" data-lora-act="no-trigger">${it.noTriggerNeeded ? "取消「不需要觸發詞」" : "這個模型不需要觸發詞"}</button>
+        <p class="meta">${it.noTriggerNeeded
+          ? "已確認不需要，生圖前不再提醒；加入任何我的觸發詞會自動取消這個確認。"
+          : "還沒確認需不需要。建議詞只是參考，加入後才會生效。"}</p>
+      </section>`;
+
+    // 從模型檔案讀取的建議詞（與 Civitai 分開）
+    let localHtml;
+    if (!m || m.state === "loading") localHtml = `<p class="lora-status">讀取模型資訊…</p>`;
+    else if (m.state === "error") localHtml = `<p class="lora-status bad">讀不到本機模型資訊：${esc(m.error || "")}</p>`;
+    else if (m.state === "none") localHtml = `<p class="lora-status">這個來源沒有提供建議詞：沒有可讀取的資料，請手動新增。</p>`;
+    else {
+      const bits = [];
+      if (m.meta.architecture) bits.push(m.meta.architecture);
+      if (m.meta.networkDim) bits.push("dim " + m.meta.networkDim);
+      if (m.meta.resolution) bits.push(m.meta.resolution);
+      localHtml = `<p class="lora-status">${esc(bits.join(" · ") || "模型資訊")}</p>` +
+        loraRenderAuthorGroups(author.local.groups, "local") +
+        (author.local.groups.length
+          ? `<button type="button" class="btn btn-ghost btn-sm" data-lora-act="use-meta">全部加入我的觸發詞</button>` : "");
+    }
+
+    // Civitai 指定版本建議
+    const cv = author.civitai;
+    const cs = S.loraCiv[it.name];
+    const cvLoading = !!(cs && cs.state === "loading");
+    let cvStatus;
+    if (!cv.versionId) {
+      cvStatus = `<p class="lora-status">還沒選版本。把下面網址貼進來，按「讀取建議」即可。</p>`;
+    } else {
+      const bits = ["來源：Civitai", "已選版本：" + cv.versionId];
+      if (cv.fetchedAt) bits.push("上次取得：" + new Date(cv.fetchedAt).toLocaleString());
+      if (cvLoading) bits.push("正在讀取，請稍候…");
+      else if (cs && cs.state === "error") bits.push("取得失敗：" + cs.error + (cs.hadData ? "（仍顯示先前已取得的建議）" : ""));
+      else if (cs && cs.changed) bits.push("作者建議已更新");
+      else if (cs && cs.state === "ready" && !cv.groups.length) bits.push("這個版本沒有提供建議詞");
+      if (cs && cs.warning) bits.push(cs.warning);
+      cvStatus = `<p class="lora-status${cs && cs.state === "error" ? " bad" : ""}">${esc(bits.join(" · "))}</p>`;
+    }
+    const civitai = `
+      <section class="lora-section">
+        <h3 class="lora-section-title">Civitai 作者提供的建議詞</h3>
+        <p class="meta">這是選用功能，不知道怎麼設定可以直接略過，不影響生圖。</p>
+        <div class="lora-cv-help">
+          <p class="meta">到模型網站找到你下載的模型，選「跟你下載的檔案相同的版本」，複製該版本的頁面網址貼在下面。選錯版本，建議詞可能不適用。</p>
+          <p class="meta lora-cv-example">網址長這樣：https://civitai.com/models/2898222?modelVersionId=3276795</p>
+        </div>
+        <div class="lora-cv-link">
+          <input id="loraCvId" type="text" placeholder="貼上版本頁面網址（也可以只貼數字）" autocomplete="off" value="${esc(cvInputs[it.name] || "")}">
+          <button type="button" class="btn btn-ghost btn-sm" data-lora-act="cv-link" ${cvLoading ? "disabled" : ""}>${cv.versionId ? "重新讀取" : "讀取建議"}</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-lora-act="cv-unlink" ${cv.versionId ? "" : "disabled"}>取消版本連結</button>
+        </div>
+        <p class="meta">取消版本連結只會移除作者建議來源，不會刪除你自己的觸發詞，也不影響生圖。</p>
+        ${cvStatus}
+        ${cv.versionId ? loraRenderAuthorGroups(cv.groups, "civitai") : ""}
+      </section>`;
+
     box.innerHTML = `
       <div class="lora-trig-head">
         <b>${esc(it.display)}</b>
         <span class="lora-pick-state">${it.enabled === false ? "未加入" : "已加入"}</span>
       </div>
-      ${metaHtml}
-      <label class="switch-row">
-        <input type="checkbox" id="loraAuto" ${it.autoTrigger ? "checked" : ""}>
-        <span class="switch-ui" aria-hidden="true"></span>
-        <span class="switch-text">自動加入提示詞<small>生成時附加在描述最後面</small></span>
-      </label>
-      <div class="lora-trig-input">
-        <input id="loraTrigInput" type="text" placeholder="輸入觸發詞，逗號分隔可一次加多個" autocomplete="off">
-        <button type="button" class="btn btn-ghost btn-sm" id="loraTrigSave">${LORA.editing >= 0 ? "更新" : "新增"}</button>
-      </div>
-      <div class="lora-trig-chips">${chips}</div>
-      <p class="meta">觸發詞只影響這個角色，不會寫進你的「補充描述」；移除角色也不會刪掉你手動輸入的相同文字。</p>`;
+      ${personal}
+      <section class="lora-section">
+        <h3 class="lora-section-title">從模型檔案讀取的建議詞</h3>
+        ${localHtml}
+      </section>
+      ${civitai}`;
     if (LORA.editing >= 0 && it.triggers[LORA.editing] != null) {
       $("loraTrigInput").value = it.triggers[LORA.editing];
     } else if (prev) {
       $("loraTrigInput").value = prev;
     }
-    // 開啟面板時才抓 metadata（失敗不影響清單與手動觸發詞）
     if (!m) loadLoraMeta(it.name);
+    if (cv.versionId && !S.loraCiv[it.name]) loadCivMeta(it.name);
   }
 
   function loadLoraMeta(name) {
@@ -2160,11 +3068,138 @@
         S.loraMeta[name] = j.meta
           ? { state: "ready", meta: j.meta }
           : { state: "none", error: j.error || "" };
+        loraSetLocalGroups(name, j.meta && j.meta.triggerWords);
       })
       .catch(e => { S.loraMeta[name] = { state: "error", error: translateLoraError(e) }; })
       .finally(() => {
         if (LORA.active === name && !$("loraModal").hidden) renderLoraTriggers(true);
       });
+  }
+
+  // 匿名公開端點：不帶 Bearer、不讀 API Key；失敗只更新暫時狀態，不清掉既有建議
+  function loadCivMeta(name) {
+    const it = loraItem(name);
+    if (!it) return;
+    const vid = it.authorSuggestions.civitai.versionId;
+    if (!vid) return;
+    // 防重複：同一 LoRA 同一版本已有進行中的請求就不再重複發送；
+    // 已完成或失敗後 pending 會被清掉，不阻止使用者重新讀取。
+    const pending = civReqPending[name];
+    if (pending && pending.vid === vid) return;
+    // 同一版本重新讀取時，先記得是否已有成功資料；失敗時仍保留舊建議
+    const hadData = it.authorSuggestions.civitai.groups.length > 0;
+    // 每次真正發起請求分配遞增序號；只有序號仍是最新的回應才允許更新狀態。
+    // 不只比對 versionId：取消後重新連結相同版本是不同操作，舊請求不得污染新操作。
+    const seq = (civReqSeq[name] = (civReqSeq[name] || 0) + 1);
+    civReqPending[name] = { vid, seq };
+    S.loraCiv[name] = { state: "loading", hadData };
+    // 立刻反映「讀取中」並禁用按鈕，避免使用者重複點擊 / 測試誤判為可重試
+    if (LORA.active === name && !$("loraModal").hidden) renderLoraTriggers(true);
+    fetch("/api/civitai/version?id=" + encodeURIComponent(vid), { cache: "no-store" })
+      .then(async r => {
+        const j = await loraReadJSON(r);
+        if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+        return j;
+      })
+      .then(j => {
+        // 過期請求（版本已變、已取消、或同版本的新操作已開始）一律丟棄
+        if (civReqSeq[name] !== seq) return;
+        const cur = loraItem(name);
+        if (!cur || cur.authorSuggestions.civitai.versionId !== vid) return;
+        const v = j.version || {};
+        const groups = loraNormGroups(v.groups);
+        const fingerprint = String(v.fingerprint || "");
+        const fetchedAt = Number(v.fetchedAt) || Date.now();
+        const changed = !!cur.authorSuggestions.civitai.fingerprint &&
+          cur.authorSuggestions.civitai.fingerprint !== fingerprint;
+        // 只更新作者建議；個人 triggers / noTriggerNeeded / 本機建議完全不變
+        S.loras = loraSet(S.loras, name, { authorSuggestions: {
+          local: cur.authorSuggestions.local,
+          civitai: { versionId: vid, groups, fetchedAt, fingerprint }
+        }});
+        loraSave();
+        S.loraCiv[name] = { state: "ready", changed, warning: v.warning || "", hadData: groups.length > 0 };
+      })
+      .catch(e => {
+        // 過期請求的失敗不可覆蓋新版本的狀態（成功路徑已有同樣檢查）
+        if (civReqSeq[name] !== seq) return;
+        const cur = loraItem(name);
+        if (!cur || cur.authorSuggestions.civitai.versionId !== vid) return;
+        S.loraCiv[name] = { state: "error", error: cvTranslate(e), hadData };
+      })
+      .finally(() => {
+        // 只清自己那筆進行中請求；過期請求不重繪、不覆蓋新操作的狀態
+        if (civReqPending[name] && civReqPending[name].seq === seq) delete civReqPending[name];
+        if (civReqSeq[name] !== seq) return;
+        if (LORA.active === name && !$("loraModal").hidden) renderLoraTriggers(true);
+      });
+  }
+
+  function loraParseCvId(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return null;
+    const m = s.match(/modelVersionId=(\d+)/i) || s.match(/^(\d+)$/);
+    if (!m) return null;
+    const id = Number(m[1]);
+    return Number.isInteger(id) && id > 0 && id <= 2147483647 ? id : null;
+  }
+
+  function loraAddAuthorWords(name, words, label) {
+    const it = loraItem(name);
+    if (!it) return;
+    if (!loraCleanTriggerList(words).length) { toast("這個群組沒有可加入的詞", "warn"); return; }
+    const plan = loraAddPlan(it.triggers, words);
+    if (!plan.added) {
+      toast(plan.room === 0 && plan.skipped > 0
+        ? `我的觸發詞已滿（${LORA_MAX_TRIGGERS} 個），請先移除一些再加入`
+        : "這些詞已經在我的觸發詞裡", "warn");
+      return;
+    }
+    S.loras = loraSet(S.loras, name, {
+      triggers: plan.next,
+      noTriggerNeeded: false
+    });
+    loraSave();
+    renderLoraSelected();
+    renderLoraPick();
+    renderLoraTriggers();
+    const tail = plan.skipped > 0
+      ? `，還有 ${plan.skipped} 個沒加入（已滿 ${LORA_MAX_TRIGGERS} 個）` : "";
+    toast(`已加入 ${plan.added} 個觸發詞${label ? "（" + label + "）" : ""}${tail}`,
+      plan.skipped > 0 ? "warn" : "ok", plan.skipped > 0 ? 5500 : 2200);
+  }
+
+  function loraLinkCv() {
+    const it = LORA.active ? loraItem(LORA.active) : null;
+    const input = $("loraCvId");
+    if (!it || !input) return;
+    if (S.loraCiv[it.name] && S.loraCiv[it.name].state === "loading") return;
+    const raw = String(input.value || "").trim();
+    const parsed = loraParseCvId(raw);
+    const prev = it.authorSuggestions.civitai;
+    // 只有「輸入框空白」才用已選版本直接重試；有輸入但格式不對要清楚提示且保留原文
+    const id = parsed || (!raw ? prev.versionId : null);
+    if (!id) {
+      toast("請貼上模型頁面的網址，或只貼版本頁面上那一串數字", "warn");
+      return;
+    }
+    cvInputs[it.name] = parsed ? input.value : (cvInputs[it.name] || String(id));
+    const same = prev.versionId === id;
+    S.loras = loraSet(S.loras, it.name, { authorSuggestions: {
+      local: it.authorSuggestions.local,
+      // 同一版本重新讀取：保留先前成功取得的建議，直到新資料回來
+      civitai: {
+        versionId: id,
+        groups: same ? prev.groups : [],
+        fetchedAt: same ? prev.fetchedAt : null,
+        fingerprint: same ? prev.fingerprint : null
+      }
+    }});
+    loraSave();
+    renderLoraSelected();
+    renderLoraTriggers();
+    loadCivMeta(it.name);
+    toast(same ? "正在更新這個版本的建議詞…" : "已選好版本，正在讀取建議詞", "ok", 2000);
   }
 
   function loraOnPickClick(e) {
@@ -2210,7 +3245,7 @@
     const next = it.triggers.slice();
     if (LORA.editing >= 0 && LORA.editing < next.length) next.splice(LORA.editing, 1, ...parts);
     else next.push(...parts);
-    S.loras = loraSet(S.loras, it.name, { triggers: next });
+    S.loras = loraSet(S.loras, it.name, { triggers: next, noTriggerNeeded: false });
     LORA.editing = -1;
     loraSave();
     renderLoraSelected();
@@ -2226,8 +3261,11 @@
     if (!it) return;
     const act = t.dataset.loraAct;
     if (act === "del-trig") {
+      const idx = Number(t.dataset.i);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= it.triggers.length) return;
       const next = it.triggers.slice();
-      next.splice(+t.dataset.i, 1);
+      next.splice(idx, 1);
+      // 刪除個人詞不得自動設成「不需要」
       S.loras = loraSet(S.loras, it.name, { triggers: next });
       LORA.editing = -1;
       loraSave();
@@ -2235,7 +3273,9 @@
       renderLoraPick();
       renderLoraTriggers();
     } else if (act === "edit-trig") {
-      LORA.editing = +t.dataset.i;
+      const idx = Number(t.dataset.i);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= it.triggers.length) return;
+      LORA.editing = idx;
       renderLoraTriggers();
       const input = $("loraTrigInput");
       if (input) {
@@ -2243,15 +3283,41 @@
         try { input.setSelectionRange(input.value.length, input.value.length); } catch (err) { /* ignore */ }
       }
     } else if (act === "use-meta") {
-      const m = S.loraMeta[it.name];
-      const sug = m && m.meta && Array.isArray(m.meta.triggerWords) ? m.meta.triggerWords : [];
-      if (!sug.length) return;
-      S.loras = loraSet(S.loras, it.name, { triggers: it.triggers.concat(sug) });
+      const groups = it.authorSuggestions.local.groups;
+      loraAddAuthorWords(it.name, groups.reduce((a, g) => a.concat(g), []));
+    } else if (act === "add-group" || act === "add-word") {
+      const src = t.dataset.src === "civitai" ? "civitai" : "local";
+      const gi = Number(t.dataset.g);
+      const groups = it.authorSuggestions[src].groups;
+      if (!Number.isInteger(gi) || gi < 0 || gi >= groups.length) return;
+      if (act === "add-group") loraAddAuthorWords(it.name, groups[gi], "整組");
+      else {
+        const wi = Number(t.dataset.w);
+        if (!Number.isInteger(wi) || wi < 0 || wi >= groups[gi].length) return;
+        loraAddAuthorWords(it.name, [groups[gi][wi]], "逐詞");
+      }
+    } else if (act === "no-trigger") {
+      S.loras = loraSet(S.loras, it.name, { noTriggerNeeded: !it.noTriggerNeeded });
       loraSave();
       renderLoraSelected();
-      renderLoraPick();
       renderLoraTriggers();
-      toast(`已帶入 ${sug.length} 個 metadata 觸發詞`, "ok");
+    } else if (act === "cv-link") {
+      loraLinkCv();
+    } else if (act === "cv-unlink") {
+      S.loras = loraSet(S.loras, it.name, { authorSuggestions: {
+        local: it.authorSuggestions.local,
+        civitai: { versionId: null, groups: [], fetchedAt: null, fingerprint: null }
+      }});
+      delete S.loraCiv[it.name];
+      delete cvInputs[it.name];
+      // 取消連結：讓讀取中的舊請求失效（不論成功或失敗都不可回頭覆蓋），並解除防重複，
+      // 之後重新連結（包含同一版本）算是全新操作。不動個人觸發詞與本機建議。
+      civReqSeq[it.name] = (civReqSeq[it.name] || 0) + 1;
+      delete civReqPending[it.name];
+      loraSave();
+      renderLoraSelected();
+      renderLoraTriggers();
+      toast("已取消版本連結；你自己的觸發詞都還在", "ok", 3000);
     }
   }
 
@@ -2269,6 +3335,9 @@
     if (e.key === "Enter" && e.target && e.target.id === "loraTrigInput") {
       e.preventDefault();
       loraSaveTriggerInput();
+    } else if (e.key === "Enter" && e.target && e.target.id === "loraCvId") {
+      e.preventDefault();
+      loraLinkCv();
     } else if (e.key === "Escape" && LORA.editing >= 0) {
       LORA.editing = -1;
       renderLoraTriggers();
@@ -2463,19 +3532,30 @@
     rvPromptTokens(posText).forEach(k => have.add(k));
     const toBottom = [], toExtra = [];
     let skipped = 0;
+    const skippedTags = [];
     (picked || []).forEach(raw => {
       if (typeof raw !== "string" && typeof raw !== "number") return;
       const name = String(raw).replace(/_/g, " ").trim();
       if (!name) return;
       const k = normKey(name);
       if (!k) return;
-      if (have.has(k)) { skipped++; return; }
+      if (have.has(k)) { skipped++; skippedTags.push(name); return; }
       have.add(k);   // 同一批 picked 中重複的正規化標籤只處理一次
       const lib = resolve ? resolve(name) : null;
-      if (lib) toBottom.push(lib);
-      else toExtra.push(name);
+      if (lib) {
+        const libKey = normKey(lib);
+        if (libKey !== k && have.has(libKey)) { skipped++; skippedTags.push(name); return; }
+        have.add(libKey);
+        toBottom.push(lib);
+      } else toExtra.push(name);
     });
-    return { toBottom: toBottom, toExtra: toExtra, skipped: skipped };
+    return { toBottom: toBottom, toExtra: toExtra, skipped: skipped, skippedTags: skippedTags };
+  }
+
+  function rvBuildApplyPlan(picked, selected, posText, resolve) {
+    const split = rvSplitPicked(picked, selected, posText, resolve);
+    const extra = rvMergePrompt(posText, split.toExtra, []);
+    return { ...split, extraText: extra.text, extraAdded: extra.added };
   }
 
   function rvResetResult() {
@@ -2494,11 +3574,26 @@
 
   function rvUpdateApply() {
     const n = RV.picked.size;
+    const plan = rvBuildApplyPlan(Array.from(RV.picked), window.Tags.selected(), $("pos").value || "",
+      name => window.Tags.matchTag(name));
+    const preview = $("rvApplyPreviewBody");
+    if (preview) {
+      const list = values => values.length
+        ? `<ul>${values.map(v => `<li>${esc(v)}</li>`).join("")}</ul>`
+        : '<p class="meta">（沒有）</p>';
+      const changed = plan.toBottom.length + plan.extraAdded;
+      preview.innerHTML = changed
+        ? `<section><h4>準備新增至標籤列 · ${plan.toBottom.length}</h4>${list(plan.toBottom)}</section>
+           <section><h4>準備新增至補充描述 · ${plan.extraAdded}</h4>${list(plan.toExtra)}</section>
+           <section><h4>已存在、將略過 · ${plan.skipped}</h4>${list(plan.skippedTags)}</section>`
+        : `<p role="status">沒有可新增內容。${plan.skipped ? `已選內容都已存在，將略過 ${plan.skipped} 個。` : "選取標籤後，這裡會顯示實際寫入位置。"}</p>
+           <section><h4>已存在、將略過 · ${plan.skipped}</h4>${list(plan.skippedTags)}</section>`;
+    }
     // 尚未選取時停用加入按鈕，避免空操作；選取後才允許送入提示詞。
     $("revApply").disabled = n === 0;
     $("revApply").classList.toggle("dim", n === 0);
     $("revApply").title = n === 0 ? "請先點選想加入的標籤" : "";
-    $("revApply").textContent = "加入提示詞（" + n + "）";
+    $("revApply").textContent = "加入目前提示詞（" + n + "）";
     $("revSelCount").textContent = "已選 " + n + " 個";
     $("revClear").disabled = n === 0;
     rvUpdateSelectionActions();
@@ -2831,7 +3926,7 @@
     const posBefore = ($("pos").value || "");
     let split;
     try {
-      split = rvSplitPicked(Array.from(RV.picked), window.Tags.selected(), posBefore,
+      split = rvBuildApplyPlan(Array.from(RV.picked), window.Tags.selected(), posBefore,
         name => window.Tags.matchTag(name));
     } catch (e) {
       toast("加入失敗，原提示詞未變更", "warn");
@@ -2842,11 +3937,10 @@
     // 路徑二：CATS 未知 → 正向提示詞欄位（增量合併，保留原始格式）
     let addedExtra = 0;
     if (split.toExtra.length) {
-      const merged = rvMergePrompt(posBefore, split.toExtra, []);
-      if (merged.added) {
-        $("pos").value = merged.text;
-        try { localStorage.setItem("ui.extra", merged.text); } catch (e) { /* 無痕模式 */ }
-        addedExtra = merged.added;
+      if (split.extraAdded) {
+        $("pos").value = split.extraText;
+        try { localStorage.setItem("ui.extra", split.extraText); } catch (e) { /* 無痕模式 */ }
+        addedExtra = split.extraAdded;
         updateWarn();
       }
     }
@@ -2855,10 +3949,10 @@
     closeReverse();
     const total = addedBottom + addedExtra;
     if (total) {
-      toast("已加入 " + total + " 個標籤（底部 " + addedBottom + "、補充描述 " + addedExtra + "）" +
+      toast("已加入目前提示詞：" + total + " 個標籤（底部 " + addedBottom + "、補充描述 " + addedExtra + "）" +
         (split.skipped ? "，略過 " + split.skipped + " 個重複" : ""), "ok");
     } else {
-      toast("選取的標籤都已存在", "warn");
+      toast("目前提示詞已包含所選標籤，沒有新增內容", "warn");
     }
   }
 
@@ -2908,6 +4002,19 @@
     // LoRA 探索中心
     $("btnLoraExplore").onclick = cvOpenModal;
     $("exploreClose").onclick = cvCloseModal;
+    $("cvKeyEdit").onclick = () => {
+      CV.key.formOpen = true; CV.key.result = ""; CV.key.resultKind = "";
+      renderKeyUI();
+      const i = $("cvKeyInput"); if (i) i.focus();
+    };
+    $("cvKeyCancel").onclick = () => {
+      CV.key.formOpen = false;
+      const i = $("cvKeyInput"); if (i) i.value = "";
+      renderKeyUI();
+    };
+    $("cvKeySave").onclick = cvKeySave;
+    $("cvKeyTest").onclick = cvKeyTest;
+    $("cvKeyRemove").onclick = cvKeyRemove;
     $("exploreModal").onclick = e => {
       if (e.target.id === "exploreModal" || e.target.closest("[data-close]")) cvCloseModal();
     };
@@ -2924,7 +4031,9 @@
     $("cvPeriod").onchange = () => { CV.period = $("cvPeriod").value; cvRunSearch(true); };
     $("cvNsfw").onchange = () => { CV.nsfw = !!$("cvNsfw").checked; cvRunSearch(true); };
     $("cvResults").addEventListener("click", e => {
-      if (e.target && e.target.id === "cvRetry") cvRunSearch(true);
+      if (e.target && e.target.id === "cvRetry") { cvRunSearch(true); return; }
+      const pv = e.target && e.target.closest("[data-cv-preview]");
+      if (pv) cvOpenPreview(pv.dataset.cvPreview);
     });
 
     // 角色 LoRA：選取清單在主畫面，搜尋／觸發詞在視窗
@@ -2940,6 +4049,12 @@
     $("loraTrigPanel").addEventListener("click", loraOnTriggersClick);
     $("loraTrigPanel").addEventListener("change", loraOnTriggersChange);
     $("loraTrigPanel").addEventListener("keydown", loraOnTriggersKey);
+    $("loraBackupNotice").addEventListener("click", e => {
+      const restore = e.target.closest("[data-backup-restore]");
+      if (restore) { confirmLoraBackup(restore.dataset.backupRestore, true); return; }
+      const b = e.target.closest("[data-backup-confirm]");
+      if (b) confirmLoraBackup(b.dataset.backupConfirm, false);
+    });
     $("loraTrigPanel").addEventListener("click", e => {
       if (e.target && e.target.id === "loraTrigSave") loraSaveTriggerInput();
     });
@@ -3108,7 +4223,8 @@
         if (a === "zoom") openLightbox(S.gallery, gIdx < 0 ? 0 : gIdx);
         if (a === "dl") download(it);
         if (a === "seed") reuseSeed(it);
-        if (a === "prompt") reusePrompt(it);
+        if (a === "prompt") reuseTextPrompt(it);
+        if (a === "restore") reusePrompt(it);
         if (a === "del") confirmDelete(it);
       } else {
         openLightbox(S.gallery, gIdx < 0 ? 0 : gIdx);
@@ -3145,7 +4261,8 @@
     $("lbDownload").onclick = () => download(S.lbList[S.lbIndex]);
     $("lbDel").onclick = () => confirmDelete(S.lbList[S.lbIndex]);
     $("lbSeed").onclick = () => { reuseSeed(S.lbList[S.lbIndex]); closeLightbox(); };
-    $("lbPrompt").onclick = () => { reusePrompt(S.lbList[S.lbIndex]); closeLightbox(); };
+    $("lbPrompt").onclick = () => { reuseTextPrompt(S.lbList[S.lbIndex]); closeLightbox(); };
+    $("lbRestore").onclick = () => { reusePrompt(S.lbList[S.lbIndex]); closeLightbox(); };
     $("lbApply").onclick = () => caOpen(S.lbList[S.lbIndex]);
 
     // 視窗
@@ -3161,9 +4278,18 @@
     // 進階設定：行內收合，記住展開狀態
     const advBox = $("advBox");
     try { advBox.open = localStorage.getItem("ui.advOpen") === "1"; } catch (e) { /* ignore */ }
+    window.Tags.refresh();
     advBox.addEventListener("toggle", () => {
       try { localStorage.setItem("ui.advOpen", advBox.open ? "1" : "0"); } catch (e) { /* ignore */ }
+      if (window.Tags && typeof window.Tags.refresh === "function") window.Tags.refresh();
     });
+    renderLoraBackupNotice();
+    const startupBackups = window.LoraMigration.parseBackup(localStorage);
+    if (startupBackups.error) toast(startupBackups.error.message, "err", 6500);
+    else {
+      const count = startupBackups.value.backups.filter(x => x && x.status === "pending").length;
+      if (count) toast(`有 ${count} 筆 LoRA 遷移備份待確認；可在角色 LoRA 區查看狀態。`, "warn", 7000);
+    }
     $("seedLock").onclick = () => {
       $("seed").value = "-1";
       persistSettings();
