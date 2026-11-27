@@ -9,6 +9,7 @@
 """
 
 import base64
+import ctypes
 import hashlib
 import http.server
 import importlib
@@ -28,6 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from ctypes import wintypes
 from decimal import Decimal, InvalidOperation
 
 def _parse_comfy_url(raw):
@@ -105,6 +107,209 @@ DATA_DIR = _user_data_dir()
 _LOG_DIR, _LOG_DIR_ERROR = _parse_dir_override(
     os.environ.get("SIMPLE_UI_LOG_DIR", ""), "SIMPLE_UI_LOG_DIR")
 LOG_DIR = _LOG_DIR or os.path.join(DATA_DIR, "logs")
+
+
+# ── Civitai Personal API Key：Windows DPAPI（CurrentUser）──────────────
+# 只保護「靜態資料」：不能抵禦同一 Windows 使用者權限下的惡意程式。
+# Key 與目前 Windows 使用者帳號（及機器）綁定，換帳號／換機必須重新輸入。
+KEY_FILE_NAME = "civitai_key.bin"
+_KEY_PATH = os.path.join(DATA_DIR, KEY_FILE_NAME)
+_KEY_BODY_LIMIT = 4096
+_CIVITAI_AUTH_HOSTS = {"civitai.com"}
+# 正式值固定為官方 /me；只有隔離測試才覆蓋為本機 mock（不進環境變數）。
+CIVITAI_ME_URL = "https://civitai.com/api/v1/me"
+
+
+class KeyStoreError(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD),
+                ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+
+def _blob(data):
+    keep = ctypes.create_string_buffer(data if data else b"\0")
+    return _DATA_BLOB(len(data), ctypes.cast(keep, ctypes.POINTER(ctypes.c_byte))), keep
+
+
+def _crypt32():
+    if os.name != "nt":
+        raise KeyStoreError("DPAPI_UNSUPPORTED", "只能在 Windows 上使用本機金鑰保護。")
+    dll = ctypes.WinDLL("crypt32", use_last_error=True)
+    sig = [ctypes.POINTER(_DATA_BLOB), wintypes.LPCWSTR, ctypes.POINTER(_DATA_BLOB),
+           wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_DATA_BLOB)]
+    dll.CryptProtectData.argtypes = sig
+    dll.CryptProtectData.restype = wintypes.BOOL
+    dll.CryptUnprotectData.argtypes = sig
+    dll.CryptUnprotectData.restype = wintypes.BOOL
+    return dll
+
+
+def _free_blob(blob):
+    try:
+        kernel = ctypes.windll.kernel32
+        kernel.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel.LocalFree.restype = ctypes.c_void_p
+        kernel.LocalFree(ctypes.cast(blob.pbData, ctypes.c_void_p))
+    except Exception:
+        pass
+
+
+def _dpapi_protect(plain):
+    dll = _crypt32()
+    src, keep = _blob(plain)
+    out = _DATA_BLOB()
+    # CRYPTPROTECT_UI_FORBIDDEN = 0x1；CurrentUser（不用 LocalMachine）
+    if not dll.CryptProtectData(ctypes.byref(src), "SidSimpleUI Civitai Key",
+                                None, None, None, 0x1, ctypes.byref(out)):
+        raise KeyStoreError("DPAPI_ERROR", "Windows 無法加密這把金鑰。")
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        _free_blob(out)
+
+
+def _dpapi_unprotect(cipher):
+    dll = _crypt32()
+    src, keep = _blob(cipher)
+    out = _DATA_BLOB()
+    if not dll.CryptUnprotectData(ctypes.byref(src), None, None, None, None,
+                                  0x1, ctypes.byref(out)):
+        raise KeyStoreError("KEY_DECRYPT_FAILED",
+                            "這台電腦無法讀取已儲存的金鑰，請重新輸入。")
+    try:
+        return bytes(ctypes.string_at(out.pbData, out.cbData))
+    finally:
+        _free_blob(out)
+
+
+def _validate_key_text(key):
+    if not isinstance(key, str):
+        return False, "金鑰格式不正確。"
+    k = key.strip()
+    if not k:
+        return False, "請輸入 Civitai API Key。"
+    if len(k) < 8 or len(k) > 512:
+        return False, "金鑰長度必須在 8～512 字元之間。"
+    if any(ord(c) < 33 or ord(c) > 126 for c in k):
+        return False, "金鑰不能包含空白或控制字元。"
+    return True, k
+
+
+def _atomic_write_key(cipher):
+    folder = os.path.dirname(_KEY_PATH) or "."
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="civitai_key_", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(cipher)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, _KEY_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def save_api_key(key):
+    ok, result = _validate_key_text(key)
+    if not ok:
+        return False, result
+    try:
+        cipher = _dpapi_protect(result.encode("utf-8"))
+        _atomic_write_key(cipher)
+        return True, ""
+    except KeyStoreError as exc:
+        return False, exc.message
+    except OSError:
+        return False, "無法寫入本機金鑰檔，請檢查 %s 的寫入權限。" % DATA_DIR
+    except Exception:
+        return False, "無法儲存金鑰，請稍後再試一次。"
+
+
+def read_api_key():
+    """只在呼叫端區域變數中解密；不快取明文於全域、不寫日誌。"""
+    try:
+        with open(_KEY_PATH, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raise KeyStoreError("KEY_NOT_SET", "尚未設定 Civitai API Key。")
+    except OSError:
+        raise KeyStoreError("KEY_READ_FAILED", "無法讀取本機金鑰檔，請重新設定。")
+    if not raw:
+        raise KeyStoreError("KEY_DECRYPT_FAILED", "本機金鑰檔內容無效，請重新輸入。")
+    try:
+        plain = _dpapi_unprotect(raw)
+        key = plain.decode("utf-8")
+    except KeyStoreError:
+        raise
+    except Exception:
+        raise KeyStoreError("KEY_DECRYPT_FAILED",
+                            "這台電腦無法讀取已儲存的金鑰，請重新輸入。")
+    ok, _ = _validate_key_text(key)
+    if not ok:
+        raise KeyStoreError("KEY_DECRYPT_FAILED", "本機金鑰檔內容無效，請重新輸入。")
+    return key
+
+
+def remove_api_key():
+    try:
+        os.remove(_KEY_PATH)
+    except FileNotFoundError:
+        return True, ""
+    except OSError:
+        return False, "無法移除本機金鑰檔，請檢查檔案權限。"
+    # 明文只在呼叫端區域變數，函式結束即離開作用域；沒有全域 Key 狀態可清。
+    return True, ""
+
+
+def key_status():
+    """只給前端「是否已設定」與解密失敗的白話提示，永不回傳 Key 或密文。"""
+    if not os.path.isfile(_KEY_PATH):
+        return {"configured": False, "error": ""}
+    try:
+        read_api_key()
+        return {"configured": True, "error": ""}
+    except KeyStoreError as exc:
+        return {"configured": True, "error": exc.message}
+
+
+def _civitai_auth_allowed():
+    """只有正式 HTTPS Civitai host、預設 443、無 URL 帳密才准附加 Bearer。
+
+    CIVITAI_API 可被環境變數覆寫，因此必須逐項驗證：
+    scheme / hostname 精確比對 / port / username/password；任何解析異常一律拒絕。
+    """
+    try:
+        parts = urllib.parse.urlsplit(CIVITAI_API)
+        if parts.scheme.lower() != "https":
+            return False
+        if parts.username is not None or parts.password is not None:
+            return False
+        host = (parts.hostname or "").lower()
+        if host not in _CIVITAI_AUTH_HOSTS:
+            return False
+        # hostname 已限定官方 host 且無 URL 帳密，netloc 只可能是 host 或 host:port。
+        # 不能用 parts.port：它對「完全沒指定」與「明確寫空 port（host:）」都回 None。
+        authority = parts.netloc.lower()
+        if authority == host:
+            return True                      # 完全沒有指定 port
+        if not authority.startswith(host + ":"):
+            return False
+        raw_port = authority[len(host) + 1:]
+        if not raw_port or not raw_port.isascii() or not raw_port.isdigit():
+            return False
+        return int(raw_port) == 443            # :0443 數值等於 443，繼續允許
+    except Exception:
+        return False
 
 
 def _split_command(raw):
@@ -496,6 +701,12 @@ CIVITAI_PERIODS = {"AllTime", "Year", "Month", "Week", "Day"}
 
 _civitai_cache = {}
 _cache_lock = threading.Lock()
+# Civitai 版本 metadata 快取寫入競態保護：
+# _civitai_gen[version_id] 記錄該版本目前最新一代的請求序號；每次 cache miss
+# 發起 upstream fetch 前遞增。只有序號仍為最新的請求，才允許寫入快取，避免
+# 較早開始但較晚完成的舊請求，覆蓋較新請求已寫入的快取結果。
+_civitai_gen = {}
+_gen_lock = threading.Lock()
 _folder_paths_mod = None
 _folder_paths_checked = False
 
@@ -518,16 +729,51 @@ def _cache_set(key, value, ttl=300):
         _civitai_cache[key] = (time.time() + ttl, value)
 
 
-def _civitai_get(path, timeout=CIVITAI_TIMEOUT):
-    """回 (obj, code, retry_after)。code：'' / HTTP_xxx / UNREACHABLE / BAD_JSON。"""
-    req = urllib.request.Request(CIVITAI_API + path, headers={
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """對帶 Bearer 的請求完全不跟隨 3xx（301/302/303/307/308）。
+
+    Python 預設 redirect_request() 會複製原 request 的所有 header（只移除
+    content-length / content-type），Authorization 因此可能被帶到另一個 Host。
+    這裡一律回傳 None，讓 http_error_30x 直接把 3xx 當成 HTTPError，
+    不產生第二次請求；匿名請求仍走原本的 urlopen，行為不變。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_without_redirect(req, timeout):
+    return urllib.request.build_opener(_NoRedirectHandler()).open(req, timeout=timeout)
+
+
+def _civitai_get(path, timeout=CIVITAI_TIMEOUT, auth=False):
+    """回 (obj, code, retry_after)。code：'' / HTTP_xxx / UNREACHABLE / BAD_JSON。
+
+    auth=True 時才可能附加 Bearer，而且只准正式 HTTPS Civitai host；
+    現有公開搜尋與 Checkpoint 查詢一律用預設 auth=False，行為不變。
+    """
+    headers = {
         "Accept": "application/json",
         "User-Agent": "SidSimpleUI/1.0 (local; public read-only)",
-    })
+    }
+    bearer = bool(auth and _civitai_auth_allowed())
+    if bearer:
+        try:
+            key = read_api_key()
+        except KeyStoreError as exc:
+            return None, exc.code, None
+        headers["Authorization"] = "Bearer " + key
+    req = urllib.request.Request(CIVITAI_API + path, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read()
+        if bearer:
+            with _open_without_redirect(req, timeout) as r:
+                raw = r.read()
+        else:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
     except urllib.error.HTTPError as e:
+        if bearer and e.code in (301, 302, 303, 307, 308):
+            return None, "REDIRECT_BLOCKED", None
         try:
             body = json.loads(e.read() or b"{}")
         except Exception:
@@ -542,12 +788,155 @@ def _civitai_get(path, timeout=CIVITAI_TIMEOUT):
         return None, "BAD_JSON", None
 
 
+def _civitai_me(key):
+    """Key 測試用：固定 Bearer 呼叫 /me，不使用 query token。
+    CIVITAI_ME_URL 正式值固定為官方端點；只有隔離測試才覆蓋為本機 mock。
+    不讀、不回顯 HTTPError body，避免敏感資訊 entering 日誌或前端。
+    """
+    req = urllib.request.Request(CIVITAI_ME_URL, headers={
+        "Accept": "application/json",
+        "User-Agent": "SidSimpleUI/1.0 (local; key test)",
+        "Authorization": "Bearer " + key,
+    })
+    try:
+        with _open_without_redirect(req, CIVITAI_TIMEOUT) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (301, 302, 303, 307, 308):
+            return None, "REDIRECT_BLOCKED", None
+        return None, "HTTP_%d" % e.code, e.headers.get("Retry-After")
+    except Exception:
+        return None, "UNREACHABLE", None
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return None, "BAD_JSON", None
+    return (obj, "", None) if isinstance(obj, dict) else (None, "BAD_JSON", None)
+
+
+def _civitai_key_error(code, retry=None):
+    """白話錯誤；不回顯 header、body、Key 或例外內容。"""
+    if code == "HTTP_401":
+        return 401, {"ok": False, "code": "CIVITAI_KEY_INVALID",
+                     "error": "金鑰無效、已被撤銷或未被 Civitai 接受，請到 Civitai 帳號設定 > API Keys 確認後重新輸入。"}
+    if code == "HTTP_403":
+        return 403, {"ok": False, "code": "CIVITAI_FORBIDDEN",
+                     "error": "Civitai 拒絕此操作，可能是帳號權限不足；這不代表金鑰無效。"}
+    if code == "HTTP_429":
+        body = {"ok": False, "code": "CIVITAI_RATE_LIMITED",
+                "error": "Civitai 要求放慢查詢，請稍後再試一次。"}
+        if retry:
+            body["retryAfter"] = str(retry)[:40]
+        return 429, body
+    if isinstance(code, str) and code.startswith("HTTP_5"):
+        return 502, {"ok": False, "code": "CIVITAI_SERVER_ERROR",
+                     "error": "Civitai 暫時無法回應，請稍後再試一次。"}
+    if code == "REDIRECT_BLOCKED":
+        return 502, {"ok": False, "code": "CIVITAI_REDIRECT_BLOCKED",
+                     "error": "Civitai 回傳了重新導向，已基於安全停止處理，請稍後再試一次。"}
+    if code == "UNREACHABLE":
+        return 503, {"ok": False, "code": "CIVITAI_OFFLINE",
+                     "error": "連不到 Civitai，請確認網路連線後再試一次。"}
+    return 502, {"ok": False, "code": "CIVITAI_BAD_RESPONSE",
+                 "error": "Civitai 回傳的資料格式不正確，請稍後再試一次。"}
+
+
 def _as_int(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
 
-def _normalize_civitai_item(raw):
-    """只保留 UI 需要的欄位；不回傳 description HTML / images / token。"""
+# LoRA 探索中心圖片：只信任 Civitai 官方圖片 CDN，且只保留中繼資料。
+# 不下載圖片、不代理圖片、不猜測 nsfwLevel bitmask 語意。
+_CIVITAI_IMAGE_HOSTS = {"image.civitai.com"}
+_CIVITAI_THUMB_WIDTH = 300
+_CIVITAI_MAX_IMAGES = 8
+
+
+def _civitai_image_urls(raw_url):
+    """回 (original, thumb)；不接受就回 (None, None)。thumb 為路径变换失敗時的 original。"""
+    if not isinstance(raw_url, str) or not raw_url or len(raw_url) > 1000:
+        return None, None
+    try:
+        p = urllib.parse.urlsplit(raw_url)
+        host = (p.hostname or "").lower()
+        port = p.port
+    except (ValueError, AttributeError):
+        return None, None
+    if p.scheme.lower() != "https" or host not in _CIVITAI_IMAGE_HOSTS:
+        return None, None
+    if port not in (None, 443) or "@" in p.netloc or not p.path.startswith("/"):
+        return None, None
+    if any(seg == ".." for seg in p.path.split("/")):
+        return None, None
+    original = urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, p.query, p.fragment))
+    thumb = original
+    parts = p.path.split("/")
+    # 實測格式：/<signature>/<uuid>/original=true/<id>.jpeg
+    # 只做「完全等於 original=true」的路徑段替換，不做任意字串拼接。
+    hits = [i for i, seg in enumerate(parts) if seg == "original=true"]
+    if len(hits) == 1:
+        parts[hits[0]] = "width=%d" % _CIVITAI_THUMB_WIDTH
+        thumb = urllib.parse.urlunsplit((p.scheme, p.netloc, "/".join(parts), p.query, p.fragment))
+    return original, thumb
+
+
+def _normalize_civitai_images(raw_images, search_nsfw=False):
+    """把版本的 images[] 正規化成固定欄位；最多 _CIVITAI_MAX_IMAGES 張。
+
+    search_nsfw 是本次 /models 搜尋使用的官方 nsfw 參數：
+      - nsfw=false → Civitai 已做成熟內容過濾，沒有明確成熟標記的公開圖片可視為安全；
+      - nsfw=true  → 不給 publicSafe，避免在成熟模式中把未分類圖片當成公開安全。
+    不解讀 nsfwLevel 數字的語意，也不可把 browsingLevel 與 nsfwLevel 混用。
+    """
+    if not isinstance(raw_images, list):
+        return []
+    out = []
+    for img in raw_images:
+        if len(out) >= _CIVITAI_MAX_IMAGES:
+            break
+        if not isinstance(img, dict):
+            continue
+        if str(img.get("type") or "image").lower() != "image":
+            continue
+        original, thumb = _civitai_image_urls(img.get("url"))
+        if not original:
+            continue
+        iid = img.get("id")
+        level = img.get("nsfwLevel")
+        nsfw = img.get("nsfw")
+        # 明確成熟標記優先於一切；不解讀 nsfwLevel 數字的語意。
+        mature = (nsfw is True or bool(img.get("minor")) or bool(img.get("poi")) or
+                  (isinstance(level, str) and level.strip().lower() in ("mature", "x")))
+        # 真實 API 的公開搜尋圖片常見「沒有 nsfw 布林、只有數字 nsfwLevel」。
+        # 安全與否的依據是官方 nsfw=false 搜尋過濾，不是猜測數字等級：
+        #   - 明確 nsfw:false，或
+        #   - 搜尋已過濾成熟內容 + 官方數字 nsfwLevel + 沒有明確成熟標記
+        # 未知字串等級、完全缺分類資訊、或 nsfw=true 搜尋結果一律不給 publicSafe。
+        numeric_level = isinstance(level, (int, float)) and not isinstance(level, bool)
+        public_safe = (not search_nsfw and not mature and
+                       (nsfw is False or numeric_level))
+        # 保留 unknown 欄位給舊呼叫端：代表「無法可靠判定」，不是「成熟」。
+        unknown = not isinstance(nsfw, bool) and not mature and not public_safe
+        out.append({
+            "id": iid if isinstance(iid, int) and not isinstance(iid, bool) else None,
+            "url": original,
+            "thumb": thumb,
+            "width": _as_int(img.get("width")) or None,
+            "height": _as_int(img.get("height")) or None,
+            "nsfwLevel": level if isinstance(level, (int, float, str)) and not isinstance(level, bool) else None,
+            "mature": bool(mature),
+            "unknown": bool(unknown),
+            "publicSafe": bool(public_safe),
+        })
+    return out
+
+
+def _normalize_civitai_item(raw, search_nsfw=False):
+    """只保留 UI 需要的欄位；不回傳 description HTML / 圖片二進位 / token。
+
+    images 只保留通過 HTTPS + CDN host 白名單檢查的中繼資料（每版本最多 8 張）。
+    search_nsfw 用來標記圖片是否來自官方 nsfw=false 的成熟內容過濾搜尋。
+    """
     if not isinstance(raw, dict) or not isinstance(raw.get("id"), int):
         return None
     versions = []
@@ -578,6 +967,10 @@ def _normalize_civitai_item(raw):
             "trainedWords": [str(x)[:200] for x in (v.get("trainedWords") or [])[:30]
                              if isinstance(x, (str, int, float)) and not isinstance(x, bool)],
             "files": files,
+            "images": _normalize_civitai_images(
+                v.get("images"),
+                search_nsfw=search_nsfw,
+            ),
             "downloadUrl": str(v.get("downloadUrl") or "")[:500],
         })
     if not versions:
@@ -597,6 +990,94 @@ def _normalize_civitai_item(raw):
         "versions": versions,
         "url": "https://civitai.com/models/%d" % raw["id"],
     }
+
+
+# ── 單一 Model Version 的公開 trainedWords（匿名、免 API Key）────────
+# 只供使用者「明確連結」的本機 LoRA 取得作者建議；不會自動套用到任何模型。
+CIVITAI_VERSION_GROUPS = 20
+CIVITAI_VERSION_WORDS = 40
+CIVITAI_VERSION_WORD_LEN = 200
+CIVITAI_VERSION_ITEM_LEN = 4000
+
+
+def _civitai_version_words(parts):
+    out, seen = [], set()
+    for raw in parts:
+        if not isinstance(raw, str):
+            continue
+        t = re.sub(r"[\r\n]+", " ", raw).strip()[:CIVITAI_VERSION_WORD_LEN]
+        if not t:
+            continue
+        norm = re.sub(r"[_\s]+", " ", t.lower()).strip()
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(t)
+        if len(out) >= CIVITAI_VERSION_WORDS:
+            break
+    return out
+
+
+def _civitai_version_groups(trained):
+    """trainedWords 是字串陣列；每元素是一整串逗號分隔組。回 (groups, warning)。"""
+    if not isinstance(trained, list):
+        return [], "trainedWords 不是陣列，已略過作者建議"
+    groups = []
+    for item in trained[:CIVITAI_VERSION_GROUPS]:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        if len(item) > CIVITAI_VERSION_ITEM_LEN:
+            continue
+        words = _civitai_version_words(re.split(r"[,\r\n]+", item))
+        if words:
+            groups.append(words)
+    return groups, ""
+
+
+def civitai_version_meta(version_id):
+    """回 (info, code, retry)。info.groups 為 string[][]；空陣列是正常狀態。
+
+    快取寫入競態保護：同一個 Version ID 只允許最新一代請求寫入快取。
+    每次 cache miss 發起 upstream fetch 前先取得該版本的新世代序號；不在等
+    待網路回應時持有世代鎖。upstream 回應成功後，只有當該請求仍是該版
+    本最新世代，才允許寫入快取。較早開始但較晚完成的舊請求，因此不
+    能覆蓋較新請求已寫入的快取；舊請求失敗也不會清除新快取。
+    """
+    if not isinstance(version_id, int) or version_id <= 0 or version_id > 2147483647:
+        return None, "BAD_VERSION_ID", None
+    key = "version|%d" % version_id
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit, "", None
+    # 取得此版本的最新請求世代；僅在 cache miss 時遞增，不持鎖等網路。
+    with _gen_lock:
+        gen = _civitai_gen.get(version_id, 0) + 1
+        _civitai_gen[version_id] = gen
+    obj, code, retry = _civitai_get("/model-versions/%d" % version_id)
+    if code:
+        return None, code, retry
+    if not isinstance(obj, dict):
+        return None, "BAD_JSON", None
+    groups, warning = _civitai_version_groups(obj.get("trainedWords"))
+    fp_src = json.dumps([version_id, groups], ensure_ascii=False, separators=(",", ":"))
+    info = {
+        "id": version_id,
+        "modelId": _as_int(obj.get("modelId")),
+        "name": str(obj.get("name") or "")[:200],
+        "baseModel": str(obj.get("baseModel") or "")[:80],
+        "baseModelType": str(obj.get("baseModelType") or "")[:40],
+        "groups": groups,
+        "fingerprint": hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16],
+        "fetchedAt": int(time.time() * 1000),
+        "warning": warning,
+        "url": "https://civitai.com/models/%d?modelVersionId=%d" % (
+            _as_int(obj.get("modelId")) or 0, version_id),
+    }
+    # 只有此請求仍是該版本最新世代，才寫入快取；舊請求晚到不得覆蓋新快取。
+    with _gen_lock:
+        if _civitai_gen.get(version_id) == gen:
+            _cache_set(key, info, ttl=300)
+    return info, "", None
 
 
 def civitai_search(query, sort="Highest Rated", period="AllTime", nsfw=False, cursor=""):
@@ -623,7 +1104,7 @@ def civitai_search(query, sort="Highest Rated", period="AllTime", nsfw=False, cu
         return [], None, code, retry
     if not isinstance(obj, dict) or not isinstance(obj.get("items"), list):
         return [], None, "BAD_JSON", None
-    items = [x for x in (_normalize_civitai_item(i) for i in obj["items"]) if x]
+    items = [x for x in (_normalize_civitai_item(i, nsfw) for i in obj["items"]) if x]
     meta = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
     nxt = meta.get("nextCursor")
     nxt = str(nxt) if isinstance(nxt, str) and nxt else None
@@ -739,7 +1220,7 @@ def _search_checkpoint_candidates(query):
             return [], err
         if not isinstance(obj, dict) or not isinstance(obj.get("items"), list):
             return [], "BAD_JSON"
-        candidates.extend([x for x in (_normalize_civitai_item(i) for i in obj["items"]) if x])
+        candidates.extend([x for x in (_normalize_civitai_item(i, True) for i in obj["items"]) if x])
         meta = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
         cursor = meta.get("nextCursor")
         if not isinstance(cursor, str) or not cursor:
@@ -1336,6 +1817,10 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._civitai_status()
         if self.path.split("?", 1)[0] == "/api/civitai/search":
             return self._civitai_search()
+        if self.path.split("?", 1)[0] == "/api/civitai/version":
+            return self._civitai_version()
+        if self.path.split("?", 1)[0] == "/api/civitai/key/status":
+            return self._civitai_key_status()
         if self.path == "/api/check":
             return self._json(405, {"error": "use POST"})
         if self.path == "/api/reverse":
@@ -1376,6 +1861,12 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._reverse()
         if self.path == "/api/output-dir":
             return self._set_output_dir()
+        if self.path == "/api/civitai/key":
+            return self._civitai_key_set()
+        if self.path == "/api/civitai/key/test":
+            return self._civitai_key_test()
+        if self.path == "/api/civitai/key/remove":
+            return self._civitai_key_remove()
         return self._json(404, {"error": "not found"})
 
     # ── 由介面設定輸出資料夾（只接受同源請求）──────────────────
@@ -1475,6 +1966,9 @@ class H(http.server.BaseHTTPRequestHandler):
         if isinstance(code, str) and code.startswith("HTTP_5"):
             return 502, {"ok": False, "code": "CIVITAI_SERVER_ERROR",
                          "error": "Civitai 暫時無法回應，請稍後再試一次。"}
+        if code == "REDIRECT_BLOCKED":
+            return 502, {"ok": False, "code": "CIVITAI_REDIRECT_BLOCKED",
+                         "error": "Civitai 回傳了重新導向，已基於安全停止處理，請稍後再試一次。"}
         if code in ("UNREACHABLE", "TIMEOUT"):
             return 503, {"ok": False, "code": "CIVITAI_OFFLINE",
                          "error": "連不到 Civitai，請確認網路連線後再試一次。"}
@@ -1514,6 +2008,99 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._json(status, body)
         return self._json(200, {"ok": True, "items": items,
                                 "nextCursor": nxt, "count": len(items)})
+
+    # ── 單一版本公開 trainedWords（匿名；不碰 API Key）────────
+    def _civitai_version(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        raw = (q.get("id") or [""])[0].strip()
+        if not re.fullmatch(r"\d{1,10}", raw):
+            return self._json(400, {"ok": False, "code": "BAD_VERSION_ID",
+                                    "error": "請輸入正確的 Civitai 版本 ID（數字）。"})
+        info, code, retry = civitai_version_meta(int(raw))
+        if code == "HTTP_404":
+            return self._json(404, {"ok": False, "code": "CIVITAI_VERSION_NOT_FOUND",
+                                    "error": "找不到這個 Civitai 版本或尚未公開。請確認版本 ID 後再試。"})
+        if code:
+            status, body = self._civitai_error(code, retry)
+            return self._json(status, body)
+        return self._json(200, {"ok": True, "version": info})
+
+    # ── Civitai Personal API Key 管理（全部只在本機同源）──────────
+    def _key_guard(self):
+        """比照 _set_output_dir()：自訂 header + Origin 白名單，避免跨站改本機憑證。"""
+        if self.headers.get("X-SimpleUI") != "1":
+            return False
+        origin = self.headers.get("Origin")
+        if origin:
+            port = self.server.server_address[1]
+            allowed = {"http://127.0.0.1:%d" % port, "http://localhost:%d" % port}
+            if origin not in allowed:
+                return False
+        return True
+
+    def _key_forbidden(self):
+        return self._json(403, {"ok": False, "code": "FORBIDDEN",
+                                "error": "無效的請求來源，請從本機生圖介面操作。"})
+
+    def _key_body(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if n > _KEY_BODY_LIMIT:
+            return None, (413, {"ok": False, "code": "TOO_LARGE", "error": "請求內容太大。"})
+        if n <= 0:
+            return {}, None
+        try:
+            data = json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            return None, (400, {"ok": False, "code": "BAD_JSON", "error": "請求格式錯誤。"})
+        if not isinstance(data, dict):
+            return None, (400, {"ok": False, "code": "BAD_JSON", "error": "請求格式錯誤。"})
+        return data, None
+
+    def _civitai_key_status(self):
+        st = key_status()
+        return self._json(200, {"ok": True, "configured": bool(st.get("configured")),
+                                "error": st.get("error") or ""})
+
+    def _civitai_key_set(self):
+        if not self._key_guard():
+            return self._key_forbidden()
+        data, err = self._key_body()
+        if err:
+            return self._json(*err)
+        ok, msg = _validate_key_text(data.get("key"))
+        if not ok:
+            return self._json(400, {"ok": False, "code": "KEY_INVALID", "error": msg})
+        saved, msg = save_api_key(data["key"])
+        if not saved:
+            return self._json(500, {"ok": False, "code": "KEY_SAVE_FAILED", "error": msg})
+        return self._json(200, {"ok": True, "configured": True})
+
+    def _civitai_key_test(self):
+        if not self._key_guard():
+            return self._key_forbidden()
+        try:
+            key = read_api_key()
+        except KeyStoreError as exc:
+            if exc.code == "KEY_NOT_SET":
+                return self._json(409, {"ok": False, "code": "KEY_NOT_SET",
+                                        "error": "尚未設定 Civitai API Key。"})
+            return self._json(409, {"ok": False, "code": exc.code, "error": exc.message})
+        obj, code, retry = _civitai_me(key)
+        if code:
+            status, body = _civitai_key_error(code, retry)
+            return self._json(status, body)
+        # 白名單欄位：不回 id / email / emailVerified / 原始 body / Key。
+        return self._json(200, {"ok": True,
+                                "username": str(obj.get("username") or "")[:100],
+                                "tier": str(obj.get("tier") or "")[:40]})
+
+    def _civitai_key_remove(self):
+        if not self._key_guard():
+            return self._key_forbidden()
+        ok, msg = remove_api_key()
+        if not ok:
+            return self._json(500, {"ok": False, "code": "KEY_REMOVE_FAILED", "error": msg})
+        return self._json(200, {"ok": True, "configured": False})
 
     # ── 檢查圖片是否還在（直接問 ComfyUI，不靠猜輸出資料夾）────────
     def _check_files(self):

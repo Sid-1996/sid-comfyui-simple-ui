@@ -53,6 +53,72 @@ LORA_ITEM = {
     }],
 }
 
+# 圖片正規化測試資料（全部是 metadata，不下載任何圖片）
+IMG_BASE = "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/fab28432-7d00-43c4-fbd6-ac5989ebf000/original=true/"
+
+
+def img(i, **kw):
+    # 真實 API 形狀：沒有 nsfw 布林，只有數字 nsfwLevel + minor/poi 布林。
+    d = {"id": i, "url": IMG_BASE + "%d.jpeg" % i, "type": "image",
+         "width": 1280, "height": 1920, "nsfwLevel": 1,
+         "minor": False, "poi": False}
+    d.update(kw)
+    return d
+
+
+INVALID_IMAGES = [
+    {"id": 900, "url": "http://image.civitai.com/a/original=true/900.jpeg", "type": "image"},
+    {"id": 901, "url": "https://evil.example/a/original=true/901.jpeg", "type": "image"},
+    {"id": 902, "url": "javascript:alert(1)", "type": "image"},
+    {"id": 903, "url": "https://image.civitai.com@evil.example/a/original=true/903.jpeg", "type": "image"},
+    {"id": 904, "url": "https://image.civitai.com/a/../original=true/904.jpeg", "type": "image"},
+    {"id": 905, "url": "https://image.civitai.com:8443/a/original=true/905.jpeg", "type": "image"},
+    {"id": 906, "url": IMG_BASE + "906.jpeg", "type": "video"},
+    {"id": 907, "url": None, "type": "image"},
+]
+
+IMAGE_LORA_ITEM = {
+    "id": 999001, "name": "Image Test Lora", "type": "LORA", "nsfw": False,
+    "creator": {"username": "imgtester"},
+    "stats": {"downloadCount": 1, "thumbsUpCount": 2},
+    "modelVersions": [
+        {"id": 99001, "name": "v-good", "baseModel": "Illustrious", "baseModelType": "Standard",
+         "trainedWords": ["word1"], "files": [],
+         "images": [
+             img(1),
+             img(2, nsfw=True),
+             img(3, minor=True),
+             img(4, poi=True),
+             img(5, nsfwLevel="Mature"),
+             {"id": 6, "url": IMG_BASE + "6.jpeg", "type": "image"},  # 未知標記
+             {"id": 7, "url": "https://image.civitai.com/sig/uuid/width=300/7.jpeg", "type": "image"},
+             img(8), img(9),
+         ] + INVALID_IMAGES},
+        {"id": 99002, "name": "v-other", "baseModel": "Pony", "baseModelType": "Standard",
+         "trainedWords": [], "files": [], "images": [img(200)]},
+        {"id": 99003, "name": "v-empty", "baseModel": "Illustrious", "images": []},
+        {"id": 99004, "name": "v-bad", "baseModel": "Illustrious", "images": "not-a-list"},
+        {"id": 99005, "name": "v-missing", "baseModel": "Illustrious"},
+        {"id": 99006, "name": "v-invalid-only", "baseModel": "Illustrious", "images": INVALID_IMAGES},
+        {"id": 99007, "name": "v-nsfw-matrix", "baseModel": "Illustrious",
+         "images": [
+             {"id": 20, "url": IMG_BASE + "%d.jpeg" %20, "type": "image", "nsfwLevel": 1},
+             {"id": 21, "url": IMG_BASE + "%d.jpeg" %21, "type": "image", "nsfwLevel": 16},
+             {"id": 22, "url": IMG_BASE + "%d.jpeg" %22, "type": "image", "nsfwLevel": "Weird"},
+             {"id": 23, "url": IMG_BASE + "%d.jpeg" %23, "type": "image", "nsfw": False, "nsfwLevel": 8},
+             {"id": 24, "url": IMG_BASE + "%d.jpeg" %24, "type": "image", "nsfw": True},
+             {"id": 25, "url": IMG_BASE + "%d.jpeg" %25, "type": "image", "minor": True},
+             {"id": 26, "url": IMG_BASE + "%d.jpeg" %26, "type": "image", "poi": True},
+             {"id": 27, "url": IMG_BASE + "%d.jpeg" %27, "type": "image", "nsfwLevel": "X"},
+             {"id": 28, "url": IMG_BASE + "%d.jpeg" %28, "type": "image", "nsfw": False, "nsfwLevel": 1},
+         ]},
+        {"id": 99008, "name": "v-query", "baseModel": "Illustrious",
+         "images": [{"id": 30,
+                     "url": "https://image.civitai.com/signature/id/original=true/example.jpeg?token=abc123&expires=456#frag",
+                     "type": "image", "nsfw": False}]},
+    ],
+}
+
 STATE = {"checkpoint_items": [CHECKPOINT_ITEM], "lora_items": [LORA_ITEM],
          "requests": [], "size": SIZE_BYTES, "mode": "normal",
          "checkpoint_by_query": {}, "checkpoint_errors": {}}
@@ -468,6 +534,150 @@ def t_checkpoint_pagination():
     check(all("nsfw=true" in p for p in calls), str(calls))
 
 
+def _image_search_item():
+    reset()
+    STATE["lora_items"] = [IMAGE_LORA_ITEM]
+    st, body = get("/api/civitai/search?q=images")
+    check(st == 200 and body["ok"] and len(body["items"]) == 1, str(body)[:300])
+    return body["items"][0]
+
+
+def t_images_normal_limit_and_urls():
+    item = _image_search_item()
+    imgs = item["versions"][0]["images"]
+    check(len(imgs) == 8, "每版本圖片上限應為 8，實際 %d" % len(imgs))
+    check([x["id"] for x in imgs] == [1, 2, 3, 4, 5, 6, 7, 8], str([x["id"] for x in imgs]))
+    check(imgs[0]["url"].startswith("https://image.civitai.com/") and "original=true" in imgs[0]["url"], str(imgs[0]))
+    check("width=300" in imgs[0]["thumb"] and "original=true" not in imgs[0]["thumb"], str(imgs[0]["thumb"]))
+    check(imgs[0]["url"] != imgs[0]["thumb"], "原圖 URL 應保留")
+    check(imgs[0]["width"] == 1280 and imgs[0]["height"] == 1920, str(imgs[0]))
+    # 非 original=true 的路徑不猜測变换，直接退回原圖
+    check(imgs[6]["thumb"] == imgs[6]["url"], str(imgs[6]))
+
+
+def t_images_nsfw_flags():
+    imgs = _image_search_item()["versions"][0]["images"]
+    check("publicSafe" in imgs[0], "缺少 publicSafe 欄位：" + str(imgs[0].keys()))
+    # 真實 API 形狀：沒有 nsfw 布林，但 nsfw=false 搜尋已過濾 → 明確安全
+    check(imgs[0]["mature"] is False and imgs[0]["unknown"] is False and imgs[0]["publicSafe"] is True,
+          "真實公開圖片應為 publicSafe：" + str(imgs[0]))
+    check(imgs[1]["mature"] is True and imgs[1]["publicSafe"] is False, "nsfw=true 應標成熟：" + str(imgs[1]))
+    check(imgs[2]["mature"] is True, "minor 應標成熟：" + str(imgs[2]))
+    check(imgs[3]["mature"] is True, "poi 應標成熟：" + str(imgs[3]))
+    check(imgs[4]["mature"] is True and imgs[4]["nsfwLevel"] == "Mature", str(imgs[4]))
+    check(imgs[5]["unknown"] is True and imgs[5]["mature"] is False and imgs[5]["publicSafe"] is False,
+          "缺少分類資訊應維持受限制：" + str(imgs[5]))
+    check(imgs[0]["nsfwLevel"] == 1, "數字 nsfwLevel 應原樣保留、不猜 bitmask：" + str(imgs[0]))
+
+
+def t_images_nsfw_unknown_matrix():
+    imgs = _image_search_item()["versions"][6]["images"]
+    # (id, mature, publicSafe, unknown)
+    expected = [
+        (20, False, True, False),   # 真實形狀 + nsfw=false 搜尋 → 明確安全
+        (21, False, True, False),   # 不解讀數字 16；安全依據是搜尋過濾
+        (22, False, False, True),   # 未知字串等級 → 受限制
+        (23, False, True, False),   # 明確 nsfw:false
+        (24, True, False, False),   # nsfw:true
+        (25, True, False, False),   # minor:true
+        (26, True, False, False),   # poi:true
+        (27, True, False, False),   # nsfwLevel:"X"
+    ]
+    for item, (iid, mature, public_safe, unknown) in zip(imgs, expected):
+        check(item["id"] == iid and item["mature"] is mature and
+              item["publicSafe"] is public_safe and item["unknown"] is unknown,
+              "NSFW 判斷錯誤：%r 期望 mature=%r publicSafe=%r unknown=%r" %
+              (item, mature, public_safe, unknown))
+
+
+def t_images_search_nsfw_flag_controls_public_safe():
+    raw = [img(50)]
+    sfw = server._normalize_civitai_images(raw, search_nsfw=False)[0]
+    mature_search = server._normalize_civitai_images(raw, search_nsfw=True)[0]
+    check(sfw["publicSafe"] is True and sfw["unknown"] is False, str(sfw))
+    check(mature_search["publicSafe"] is False and mature_search["unknown"] is True, str(mature_search))
+    check(sfw["nsfwLevel"] == mature_search["nsfwLevel"] == 1, "nsfwLevel 應原樣保留")
+
+
+def t_item_normalization_propagates_search_nsfw():
+    """完整呼叫鏈：_normalize_civitai_item(raw, flag) → 圖片 publicSafe。"""
+    raw = {
+        "id": 999001, "name": "integration", "type": "LORA", "nsfw": True,
+        "modelVersions": [{
+            "id": 999010, "name": "v1", "baseModel": "Illustrious",
+            "images": [img(60), img(61, nsfw=True), img(62, minor=True)],
+        }],
+    }
+    sfw = server._normalize_civitai_item(raw, search_nsfw=False)
+    mature = server._normalize_civitai_item(raw, search_nsfw=True)
+    check(sfw is not None and mature is not None, "模型正規化失敗")
+    a = sfw["versions"][0]["images"][0]
+    b = mature["versions"][0]["images"][0]
+    check(a["publicSafe"] is True and a["unknown"] is False,
+          "search_nsfw=False 應為 publicSafe：" + str(a))
+    check(b["publicSafe"] is False and b["unknown"] is True,
+          "search_nsfw=True 不應為 publicSafe：" + str(b))
+    for res in (sfw, mature):
+        ims = res["versions"][0]["images"]
+        check(ims[1]["mature"] is True and ims[1]["publicSafe"] is False, str(ims[1]))
+        check(ims[2]["mature"] is True and ims[2]["publicSafe"] is False, str(ims[2]))
+        check(res["nsfw"] is True, "模型層級 nsfw 應原樣保留：" + str(res.keys()))
+        need = {"id", "url", "thumb", "width", "height", "nsfwLevel",
+                "mature", "unknown", "publicSafe"}
+        check(need.issubset(set(ims[0].keys())), "API 欄位不相容：" + str(ims[0].keys()))
+
+
+def t_search_api_preserves_nsfw_flag_to_images():
+    """實際 API 路徑：nsfw 參數 → civitai_search → item → images。"""
+    for nsfw, expected in (("0", True), ("1", False)):
+        reset()
+        STATE["lora_items"] = [IMAGE_LORA_ITEM]
+        st, body = get("/api/civitai/search?" + urllib.parse.urlencode({
+            "q": "images", "nsfw": nsfw}))
+        check(st == 200 and body["ok"], str(body)[:300])
+        im = body["items"][0]["versions"][0]["images"][0]
+        check(im["publicSafe"] is expected,
+              "nsfw=%s 應 publicSafe=%r：%s" % (nsfw, expected, str(im)))
+        qs = STATE["requests"][-1]["query"]
+        check((qs.get("nsfw") or [""])[0] == ("false" if nsfw == "0" else "true"), str(qs))
+
+
+def t_images_query_and_fragment_preserved():
+    im = _image_search_item()["versions"][7]["images"][0]
+    original = "https://image.civitai.com/signature/id/original=true/example.jpeg?token=abc123&expires=456#frag"
+    thumb = "https://image.civitai.com/signature/id/width=300/example.jpeg?token=abc123&expires=456#frag"
+    check(im["url"] == original, str(im["url"]))
+    check(im["thumb"] == thumb, str(im["thumb"]))
+    check("original=true" not in im["thumb"] and "width=300" in im["thumb"], str(im["thumb"]))
+
+
+def t_images_missing_empty_nonarray():
+    vs = _image_search_item()["versions"]
+    check(vs[2]["images"] == [], str(vs[2]))
+    check(vs[3]["images"] == [], str(vs[3]))
+    check(vs[4]["images"] == [], str(vs[4]))
+
+
+def t_images_invalid_urls_rejected():
+    item = _image_search_item()
+    check(item["versions"][5]["images"] == [], str(item["versions"][5]))
+    ids = [x["id"] for x in item["versions"][0]["images"]]
+    check(all(i < 900 for i in ids), "無效 URL/類型不應留住：" + str(ids))
+
+
+def t_images_version_separation_and_compat():
+    item = _image_search_item()
+    v1 = [x["id"] for x in item["versions"][0]["images"]]
+    v2 = [x["id"] for x in item["versions"][1]["images"]]
+    check(v1 == [1, 2, 3, 4, 5, 6, 7, 8] and v2 == [200], str((v1, v2)))
+    check("description" not in item and "images" not in item, str(item.keys()))
+    check(item["name"] == "Image Test Lora" and item["creator"] == "imgtester", str(item))
+    check(item["versions"][0]["trainedWords"] == ["word1"], str(item["versions"][0]))
+    check(item["url"] == "https://civitai.com/models/999001", str(item))
+    need = {"id", "name", "baseModel", "baseModelType", "trainedWords", "files", "images", "downloadUrl"}
+    check(need.issubset(set(item["versions"][0].keys())), str(item["versions"][0].keys()))
+
+
 tests = [
     ("精確匹配成功後寫入 900 秒快取，重查不再打 Civitai", t_exact_hit_cached_900s),
     ("精確匹配缺少 baseModel → 安全降級 BASE_MODEL_UNAVAILABLE", t_exact_hit_missing_base_model),
@@ -494,6 +704,16 @@ tests = [
     ("無效 JSON → CIVITAI_BAD_RESPONSE", t_search_bad_json),
     ("錯誤參數 → 400", t_search_bad_params),
     ("sizeKB 以 Decimal 精確比對", t_size_decimal),
+    ("圖片正規化：多張上限、縮圖变换、原圖保留、非原圖路徑降級", t_images_normal_limit_and_urls),
+    ("圖片 NSFW：明確成熟／未知標記保守處理、數字等級不猜測", t_images_nsfw_flags),
+    ("圖片 NSFW 矩陣：真實形狀＋nsfw=false 搜尋才安全，未知字串受限制", t_images_nsfw_unknown_matrix),
+    ("搜尋 nsfw 旗標控制 publicSafe，數字等級不被解讀", t_images_search_nsfw_flag_controls_public_safe),
+    ("整合測試：_normalize_civitai_item 正確傳遞 search_nsfw 到圖片", t_item_normalization_propagates_search_nsfw),
+    ("整合測試：/api/civitai/search 的 nsfw 参数完整傳到圖片分類", t_search_api_preserves_nsfw_flag_to_images),
+    ("縮圖变换保留 query string 與 fragment", t_images_query_and_fragment_preserved),
+    ("圖片缺欄位／空陣列／非陣列皆安全回空", t_images_missing_empty_nonarray),
+    ("圖片無效 URL / 非 HTTPS / 不可信 CDN / 非 image 類型全數拒絕", t_images_invalid_urls_rejected),
+    ("圖片按版本隔離、原有 API 欄位相容", t_images_version_separation_and_compat),
 ]
 for name, fn in tests:
     test(name, fn)
