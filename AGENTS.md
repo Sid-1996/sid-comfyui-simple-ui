@@ -18,6 +18,8 @@ app.css             設計 token 與全部樣式（深紫主題）
 app.js              生成流程、進度、取消、歷史、燈箱、快捷鍵（IIFE）
 tags.js             標籤庫資料與渲染，暴露 window.Tags（IIFE）
 dict.js             中文 → Danbooru 英文對照，暴露 window.Dict（IIFE）
+prompt_core.js      PromptEntry 正規化、PromptModel 與 PromptComposer（IIFE）
+lora_migration.js   LoRA localStorage v1→v2 遷移與安全備份（IIFE）
 tag_categories.js   標籤分類資料（由 index.html 載入）
 r18.json            成人標籤資料
 server.py           標準庫 HTTP 伺服器：靜態檔 + /comfy 代理 + /ws 隧道 + API
@@ -155,6 +157,20 @@ python -m py_compile server.py
 - 不要為了追求測試數量執行沒有價值的測試。
 - 不要大量生成圖片或佔用 GPU 進行驗收。
 - 涉及 API 回傳格式、localStorage、代理或 WS 的修改，必須做相容性回歸。
+
+### 12.1 瀏覽器工具路由：`browse` 與 `browser` 是兩套，不可混用
+
+| 工具 | 身份 | 適合 | 不適合 |
+|---|---|---|---|
+| **`browse` MCP（`tools.browse.*`）** | OpenCode 瀏覽器擴充 relay，操作**使用者本機真正的 Chrome**（含其登入狀態與既有分頁） | 任何「使用者目前看到的頁面」：正式 UI 驗收、需登入頁面、network／console 除錯、外部頁面唯讀查核 | 單純在 App 裡展示工作區檔案 |
+| **`browser` 工具（`tools.browser.*`）** | OpenCode 桌面 App 內建隔離瀏覽器／檔案預覽，**不是使用者的 Chrome**，通常沒有使用者登入狀態 | 把工作區 HTML／PNG／Markdown 顯示給使用者看、App 內預覽 | 不可拿來聲稱「已在使用者瀏覽器實測」；不可用來判斷需登入頁面（會誤判成登入遮罩） |
+
+- 口訣：**看使用者真實頁面用 `browse`；在 App 裡秀檔案用 `browser`。**
+- 用 `browse` 前先看 `browse status`，必須 `connected: true` 且有已連線 browser（如 `chrome-this-computer`）；`paired-offline`／`reconnecting` 時稍後再查，不要換 `browser` 冒充已連線。
+- `browse navigate` 不帶 `tab` 開新分頁並回傳 `tab`，後續呼叫都帶同一個 `tab`，結束關掉自己開的分頁；使用者借出的 `lent: true` 分頁不可動。
+- 唯讀查核開 `readOnly: true`；要舉證真的看過頁面就用 `browse screenshot`。
+- `browse.eval` 隔離世界看不到 `window.Tags`／`window.Dict`；需讀頁面自身 JS 全域（如 `window.__NEXT_DATA__`）才用 `world: "main"`。
+- 教訓：2026-11-26 查核 civitai.red 誤用 `browser`，因未登入只見「Log in to view」，差點寫出錯誤結論；改用 `browse` 後頁面完整可見。涉及真實瀏覽器／登入狀態一律 `browse`。
 
 ## 13. 禁止事項與正式環境注意事項
 
